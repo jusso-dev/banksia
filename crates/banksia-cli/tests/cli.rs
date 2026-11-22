@@ -186,3 +186,134 @@ async fn backup_failure_exits_non_zero() {
     assert_eq!(c, 2, "{out}");
     assert!(out.contains("FAIL"), "{out}");
 }
+
+const RESTORE_CFG: &str = r#"
+[restore]
+enabled = true
+allowed_targets = ["restore-test@contoso.onmicrosoft.com"]
+
+[restore.auth]
+client_id = "restore-app"
+client_secret = { env = "BANKSIA_TEST_RESTORE_SECRET" }
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_plan_dry_run_and_apply() {
+    let s = Setup::new(RESTORE_CFG).await;
+    let u = s.tenant.add_user("adele@contoso.onmicrosoft.com", "Adele");
+    let t = s
+        .tenant
+        .add_user("restore-test@contoso.onmicrosoft.com", "Restore Test");
+    s.tenant.add_drive_folder(&u, "Documents");
+    s.tenant.add_file(&u, "Documents/plan.txt", b"the plan");
+    init(&s);
+    assert_eq!(s.run(&["backup", "run", "--workload", "drive"]).0, 0);
+
+    let plan = s.path("plan.json");
+    let (c, out, err) = s.run(&[
+        "restore",
+        "plan",
+        "--user",
+        &u.upn,
+        "--workload",
+        "drive",
+        "--path",
+        "Documents",
+        "--target",
+        &t.upn,
+        "--reason",
+        "ticket 42",
+        "--out",
+        plan.to_str().unwrap(),
+    ]);
+    assert_eq!(c, 0, "{err}");
+    let hash = out
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("hash"))
+        .unwrap()
+        .trim()
+        .to_string();
+    let writes = s.tenant.writes();
+
+    // Wrong approval refused.
+    let (c, _, err) = s.run(&[
+        "restore",
+        "apply",
+        "--plan",
+        plan.to_str().unwrap(),
+        "--approve",
+        "000000000000",
+    ]);
+    assert_eq!(c, 1);
+    assert!(err.contains("does not match"), "{err}");
+
+    let (c, out, err) = s.run(&[
+        "restore",
+        "apply",
+        "--plan",
+        plan.to_str().unwrap(),
+        "--approve",
+        &hash[..12],
+        "--dry-run",
+    ]);
+    assert_eq!(c, 0, "{out}{err}");
+    assert!(out.contains("dry run: 4 would be created"), "{out}");
+    assert_eq!(s.tenant.writes(), writes);
+
+    let (c, out, err) = s.run(&[
+        "restore",
+        "apply",
+        "--plan",
+        plan.to_str().unwrap(),
+        "--approve",
+        &hash,
+    ]);
+    assert_eq!(c, 0, "{out}{err}");
+    let restored = s.tenant.file_count(&t);
+    assert_eq!(restored, 1);
+    no_secrets(&out);
+    no_secrets(&err);
+
+    let (c, out, _) = s.run(&["audit", "list"]);
+    assert_eq!(c, 0);
+    for k in [
+        "restore.plan_created",
+        "restore.dry_run",
+        "restore.apply_started",
+        "restore.apply_finished",
+    ] {
+        assert!(out.contains(k), "{k} missing: {out}");
+    }
+
+    // Restoring into a user not on the allowlist is refused at apply.
+    let plan2 = s.path("plan2.json");
+    let (c, _, err) = s.run(&[
+        "restore",
+        "plan",
+        "--user",
+        &u.upn,
+        "--workload",
+        "drive",
+        "--all",
+        "--out",
+        plan2.to_str().unwrap(),
+    ]);
+    assert_eq!(c, 0);
+    assert!(err.contains("not on restore.allowed_targets"), "{err}");
+    let text = std::fs::read(&plan2).unwrap();
+    let h = banksia_core_hash(&text);
+    let (c, _, err) = s.run(&[
+        "restore",
+        "apply",
+        "--plan",
+        plan2.to_str().unwrap(),
+        "--approve",
+        &h,
+    ]);
+    assert_eq!(c, 1);
+    assert!(err.contains("allowlist"), "{err}");
+}
+
+fn banksia_core_hash(b: &[u8]) -> String {
+    banksia_core::restore::plan_hash(b)
+}

@@ -105,6 +105,7 @@ struct TenantState {
     corrupt_downloads: HashSet<String>,
     corrupt_next_upload: bool,
     drop_next_upload_response: bool,
+    fail_message_imports: u32,
     requests: Vec<String>,
     token_requests: usize,
     token_leaks: usize,
@@ -217,6 +218,11 @@ impl FakeTenant {
     /// Commit the next upload fragment but answer 504, as if the response was lost.
     pub fn drop_next_upload_response(&self) {
         self.st().drop_next_upload_response = true;
+    }
+
+    /// Reject the next `n` MIME message imports with 503.
+    pub fn fail_message_imports(&self, n: u32) {
+        self.st().fail_message_imports = n;
     }
 
     /// Flip a byte in the next uploaded file.
@@ -839,6 +845,10 @@ fn route(
             if !s.folders.contains_key(*f) {
                 return err(404, "ErrorItemNotFound", "folder not found");
             }
+            if s.fail_message_imports > 0 {
+                s.fail_message_imports -= 1;
+                return err(503, "ServiceUnavailable", "injected import failure");
+            }
             let ct = headers
                 .get(header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
@@ -911,6 +921,17 @@ fn route(
             }
             _ => err(404, "itemNotFound", "The resource could not be found."),
         },
+        (Method::GET, ["drives", d, "items", parent, "children"]) => {
+            let list: Vec<Value> = s
+                .items
+                .values()
+                .filter(|i| {
+                    i.drive_id == *d && i.parent_id.as_deref() == Some(*parent) && !i.deleted
+                })
+                .map(|i| item_json(s, i))
+                .collect();
+            ok(json!({"value": list}))
+        }
         (Method::POST, ["drives", d, "items", parent, "children"]) => {
             let (d, parent) = (d.to_string(), parent.to_string());
             drive_create_folder(s, &d, &parent, body)
