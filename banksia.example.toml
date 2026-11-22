@@ -1,0 +1,75 @@
+# Banksia example configuration.
+#
+# Copy to banksia.toml (gitignored) and edit. Secret values never go in this
+# file: each secret field names an environment variable (env) or a file
+# (file) that holds the value. Files must be mode 600.
+
+[tenant]
+tenant_id = "contoso.onmicrosoft.com"
+
+[storage]
+# Azure Blob. Without access_key, Banksia uses workload identity, managed
+# identity or Azure CLI credentials from the environment.
+kind = "azure"
+account = "banksiabackupaue"
+container = "banksia"
+prefix = "prod"
+# access_key = { env = "BANKSIA_AZURE_STORAGE_KEY" }
+
+# Cloudflare R2 (S3 API):
+# kind = "s3"
+# endpoint = "https://<account id>.r2.cloudflarestorage.com"
+# bucket = "banksia"
+# region = "auto"
+# access_key_id = { env = "BANKSIA_R2_ACCESS_KEY_ID" }
+# secret_access_key = { env = "BANKSIA_R2_SECRET_ACCESS_KEY" }
+
+# Local directory:
+# kind = "local"
+# path = "/var/lib/banksia/repo"
+
+[key]
+# Created with: banksia key generate --out /etc/banksia/master.key
+master_key = { file = "/etc/banksia/master.key" }
+
+[graph]
+max_retries = 8
+concurrency = 4
+
+[state]
+dir = "/var/lib/banksia/state"
+
+[backup.auth]
+# The read-only backup app registration.
+client_id = "00000000-0000-0000-0000-000000000001"
+certificate_path = "/etc/banksia/backup-cert.pem"
+private_key = { file = "/etc/banksia/backup-key.pem" }
+
+[[backup.users]]
+id = "adele@contoso.onmicrosoft.com"
+workloads = ["mail", "drive"]
+
+[[backup.users]]
+id = "alex@contoso.onmicrosoft.com"
+workloads = ["mail"]
+
+[restore]
+# Restores into the tenant are refused unless enabled.
+enabled = false
+allowed_targets = [
+  "adele@contoso.onmicrosoft.com",
+  "restore-test@contoso.onmicrosoft.com",
+]
+
+[restore.auth]
+# A separate app registration with write permissions.
+client_id = "00000000-0000-0000-0000-000000000002"
+certificate_path = "/etc/banksia/restore-cert.pem"
+private_key = { file = "/etc/banksia/restore-key.pem" }
+
+[restore_test]
+mail_target = "restore-test@contoso.onmicrosoft.com"
+drive_target = "restore-test@contoso.onmicrosoft.com"
+sample_size = 5
+max_snapshot_age_hours = 26
+evidence_dir = "/var/lib/banksia/evidence"

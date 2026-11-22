@@ -1,0 +1,15 @@
+/target
+# Local configuration and secrets. Never commit these.
+banksia.toml
+banksia.*.toml
+!banksia.example.toml
+*.key
+*.pem
+*.pfx
+*.p12
+.env
+.env.*
+# Local state, evidence output and local repositories.
+.banksia-state/
+evidence/
+banksia-repo/
