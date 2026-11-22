@@ -91,6 +91,9 @@ pub async fn backup_one(ctx: &BackupContext, user: &str, workload: Workload) -> 
         .await
         .with_context(|| format!("cannot resolve user {user}"))?;
     let tag = ctx.repo.principal_tag(&principal.object_id);
+    // One backup per user and workload at a time, across processes.
+    let _lock = crate::lock::Lock::acquire(&ctx.state_dir, &format!("backup-{tag}-{workload}"))
+        .with_context(|| format!("another backup of {user} {workload} is running"))?;
     let parent = ctx.repo.latest_snapshot(&tag, workload).await?;
     let mut cp = Checkpoint::open(&ctx.state_dir, ctx.repo.keys(), &tag, workload.as_str())?;
     if !cp.is_empty() {

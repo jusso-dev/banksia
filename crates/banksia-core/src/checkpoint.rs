@@ -88,7 +88,11 @@ impl Checkpoint {
         }
         let plain = serde_json::to_vec(&self.data)?;
         let sealed = self.keys.seal(&self.aad, &plain)?;
-        let tmp = self.path.with_extension("tmp");
+        let mut r = [0u8; 6];
+        crate::crypto::fill_random(&mut r);
+        let tmp =
+            self.path
+                .with_extension(format!("{}.{}.tmp", std::process::id(), hex::encode(r)));
         std::fs::write(&tmp, sealed)?;
         std::fs::rename(&tmp, &self.path)?;
         self.dirty = 0;

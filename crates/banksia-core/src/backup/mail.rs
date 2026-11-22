@@ -103,37 +103,80 @@ pub(crate) async fn backup(
             BTreeMap::new()
         };
 
+        // Collapse the change feed to the final state of each message before
+        // downloading anything: a message added then removed in the same
+        // window is never fetched, and one edited twice is fetched once.
+        let mut last: BTreeMap<String, Message> = BTreeMap::new();
+        let mut order: Vec<String> = Vec::new();
         for m in changes {
+            if !last.contains_key(&m.id) {
+                order.push(m.id.clone());
+            }
+            last.insert(m.id.clone(), m);
+        }
+        for id in order {
+            let m = last.remove(&id).expect("collected above");
             if m.removed.is_some() {
                 current.remove(&m.id);
                 continue;
             }
-            let version = m.change_key.clone().unwrap_or_default();
+            // Without a change key, Banksia cannot tell whether the message
+            // changed, so it always downloads and never uses the checkpoint.
+            let version = m.change_key.clone().filter(|v| !v.is_empty());
             let unchanged = previous
                 .get(m.id.as_str())
-                .filter(|p| p.change_key.is_some() && p.change_key == m.change_key);
-            let content = if let Some(p) = unchanged {
+                .filter(|p| version.is_some() && p.change_key == version);
+            if let Some(p) = unchanged {
                 run.stats.items_carried_forward += 1;
-                Some(p.content.clone())
-            } else if let Some(c) = run.cp.get(&m.id, &version) {
+                current.insert(
+                    m.id.clone(),
+                    MessageEntry {
+                        folder_id: folder.id.clone(),
+                        ..(*p).clone()
+                    },
+                );
+                continue;
+            }
+            let content = if let Some(c) = version.as_deref().and_then(|v| run.cp.get(&m.id, v)) {
                 run.stats.items_carried_forward += 1;
-                Some(c.clone())
+                c.clone()
             } else {
                 match run
                     .fetch(&format!("/users/{user_id}/messages/{}/$value", m.id))
                     .await
                 {
                     Ok(f) => {
-                        run.cp.record(&m.id, &version, f.content.clone())?;
-                        Some(f.content)
+                        if let Some(v) = &version {
+                            run.cp.record(&m.id, v, f.content.clone())?;
+                        }
+                        f.content
+                    }
+                    Err(e)
+                        if e.downcast_ref::<banksia_graph::GraphError>()
+                            .is_some_and(|g| g.is_not_found()) =>
+                    {
+                        // Deleted between the delta query and the download.
+                        // The next delta reports the removal.
+                        current.remove(&m.id);
+                        continue;
                     }
                     Err(e) => {
                         run.error(&m.id, format!("{e:#}"));
-                        previous.get(m.id.as_str()).map(|p| p.content.clone())
+                        // Keep the whole previous entry, including its old
+                        // change key, so the next run downloads it again.
+                        if let Some(p) = previous.get(m.id.as_str()) {
+                            current.insert(
+                                m.id.clone(),
+                                MessageEntry {
+                                    folder_id: folder.id.clone(),
+                                    ..(*p).clone()
+                                },
+                            );
+                        }
+                        continue;
                     }
                 }
             };
-            let Some(content) = content else { continue };
             current.insert(
                 m.id.clone(),
                 MessageEntry {

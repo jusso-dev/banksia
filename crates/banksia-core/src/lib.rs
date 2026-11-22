@@ -6,6 +6,7 @@ pub mod checkpoint;
 pub mod config;
 pub mod crypto;
 pub mod graph;
+pub mod lock;
 pub mod repo;
 pub mod secret;
 pub mod snapshot;

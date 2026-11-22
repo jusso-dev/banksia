@@ -311,3 +311,102 @@ async fn failed_message_is_retried_on_next_incremental() {
     assert_eq!(s2.mail.as_ref().unwrap().messages.len(), 2);
     assert_eq!(s2.stats.items_downloaded, 1);
 }
+
+#[tokio::test]
+async fn failed_download_of_changed_message_is_retried_not_frozen() {
+    let env = Env::new().await;
+    let t = &env.tenant;
+    let u = t.add_user("adele@contoso.onmicrosoft.com", "Adele");
+    let id = t.add_message(&u, "Inbox", &mime("v1", "v1", "first"));
+    let ctx = env.backup_ctx();
+    backup::backup_one(&ctx, &u.upn, Workload::Mail)
+        .await
+        .unwrap();
+    t.touch_message(&id);
+    t.inject(Fault {
+        path_contains: format!("/messages/{id}/$value"),
+        status: 503,
+        retry_after: None,
+        times: 6,
+    });
+    let s2 = backup::backup_one(&ctx, &u.upn, Workload::Mail)
+        .await
+        .unwrap();
+    assert!(s2.partial);
+    // The next run must download again, not treat the new change key as stored.
+    let s3 = backup::backup_one(&ctx, &u.upn, Workload::Mail)
+        .await
+        .unwrap();
+    assert!(!s3.partial);
+    assert_eq!(s3.stats.items_downloaded, 1);
+}
+
+#[tokio::test]
+async fn message_deleted_before_download_does_not_wedge_delta() {
+    let env = Env::new().await;
+    let t = &env.tenant;
+    let u = t.add_user("adele@contoso.onmicrosoft.com", "Adele");
+    t.add_message(&u, "Inbox", &mime("keep", "keep", "x"));
+    let ctx = env.backup_ctx();
+    backup::backup_one(&ctx, &u.upn, Workload::Mail)
+        .await
+        .unwrap();
+    let gone = t.add_message(&u, "Inbox", &mime("gone", "gone", "y"));
+    // 404 on download, as if deleted between delta and fetch.
+    t.inject(Fault {
+        path_contains: format!("/messages/{gone}/$value"),
+        status: 404,
+        retry_after: None,
+        times: 1,
+    });
+    let s = backup::backup_one(&ctx, &u.upn, Workload::Mail)
+        .await
+        .unwrap();
+    assert!(!s.partial, "{:?}", s.errors);
+    assert_eq!(s.mail.unwrap().messages.len(), 1);
+}
+
+#[tokio::test]
+async fn lookup_by_new_upn_after_rename() {
+    let env = Env::new().await;
+    let t = &env.tenant;
+    let u = t.add_user("alice.smith@contoso.onmicrosoft.com", "Alice");
+    t.add_message(&u, "Inbox", &mime("a", "a", "x"));
+    let ctx = env.backup_ctx();
+    backup::backup_one(&ctx, &u.upn, Workload::Mail)
+        .await
+        .unwrap();
+    t.rename_user(&u.id, "alice.jones@contoso.onmicrosoft.com");
+    backup::backup_one(&ctx, "alice.jones@contoso.onmicrosoft.com", Workload::Mail)
+        .await
+        .unwrap();
+    let (tag, _) = env
+        .repo
+        .find_principal("alice.jones@contoso.onmicrosoft.com")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(tag, env.repo.principal_tag(&u.id));
+    assert!(
+        env.repo
+            .find_principal("alice.smith@contoso.onmicrosoft.com")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_backup_of_same_user_is_refused() {
+    let env = Env::new().await;
+    let t = &env.tenant;
+    let u = t.add_user("adele@contoso.onmicrosoft.com", "Adele");
+    let ctx = env.backup_ctx();
+    let tag = env.repo.principal_tag(&u.id);
+    let _held =
+        banksia_core::lock::Lock::acquire(env.state.path(), &format!("backup-{tag}-mail")).unwrap();
+    let e = backup::backup_one(&ctx, &u.upn, Workload::Mail)
+        .await
+        .unwrap_err();
+    assert!(format!("{e:#}").contains("another backup"), "{e:#}");
+}

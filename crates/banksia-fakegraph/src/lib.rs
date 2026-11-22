@@ -179,6 +179,17 @@ impl FakeTenant {
         format!("http://{}/v1.0", self.addr)
     }
 
+    /// Change a user's UPN, keeping the object id.
+    pub fn rename_user(&self, id: &str, upn: &str) {
+        let mut s = self.st();
+        let u = s
+            .users
+            .iter_mut()
+            .find(|u| u.id == id)
+            .expect("user exists");
+        u.upn = upn.to_string();
+    }
+
     pub fn set_page_size(&self, n: usize) {
         self.st().page_size = n.max(1);
     }

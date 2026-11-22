@@ -61,7 +61,11 @@ pub(crate) async fn backup(
         let prev_content = items
             .get(&it.id)
             .and_then(|e| e.content.clone())
-            .filter(|_| items.get(&it.id).map(|e| &e.c_tag) == Some(&it.c_tag));
+            // Only reuse content when Graph gives a cTag to compare. With no
+            // cTag, Banksia cannot tell whether the content changed.
+            .filter(|_| {
+                it.c_tag.is_some() && items.get(&it.id).map(|e| &e.c_tag) == Some(&it.c_tag)
+            });
         items.insert(
             it.id.clone(),
             DriveEntry {
@@ -112,14 +116,16 @@ pub(crate) async fn backup(
         .collect();
     for id in pending {
         let entry = items.get(&id).expect("pending item").clone();
-        let version = entry.c_tag.clone().unwrap_or_default();
+        let version = entry.c_tag.clone().filter(|v| !v.is_empty());
         let unchanged = previous
             .get(id.as_str())
-            .filter(|p| p.c_tag.is_some() && p.c_tag == entry.c_tag && p.content.is_some());
+            .filter(|p| version.is_some() && p.c_tag == version && p.content.is_some());
+        let mut local_qx = None;
         let content = if let Some(p) = unchanged {
             run.stats.items_carried_forward += 1;
+            local_qx = p.quick_xor_hash.clone();
             p.content.clone()
-        } else if let Some(c) = run.cp.get(&id, &version) {
+        } else if let Some(c) = version.as_deref().and_then(|v| run.cp.get(&id, v)) {
             run.stats.items_carried_forward += 1;
             Some(c.clone())
         } else {
@@ -150,8 +156,20 @@ pub(crate) async fn backup(
                     None
                 }
                 Ok(f) => {
-                    run.cp.record(&id, &version, f.content.clone())?;
+                    if let Some(v) = &version {
+                        run.cp.record(&id, v, f.content.clone())?;
+                    }
+                    local_qx = Some(f.quick_xor);
                     Some(f.content)
+                }
+                Err(e)
+                    if e.downcast_ref::<banksia_graph::GraphError>()
+                        .is_some_and(|g| g.is_not_found()) =>
+                {
+                    // Deleted between the delta query and the download; the
+                    // next delta reports the deletion.
+                    items.remove(&id);
+                    continue;
                 }
                 Err(e) => {
                     run.error(&id, format!("{e:#}"));
@@ -160,7 +178,14 @@ pub(crate) async fn backup(
             }
         };
         match content {
-            Some(c) => items.get_mut(&id).expect("item").content = Some(c),
+            Some(c) => {
+                let e = items.get_mut(&id).expect("item");
+                e.content = Some(c);
+                // Keep a hash for restore checks even if Graph did not report one.
+                if e.quick_xor_hash.is_none() {
+                    e.quick_xor_hash = local_qx;
+                }
+            }
             None => match previous.get(id.as_str()).filter(|p| p.content.is_some()) {
                 // Keep the last good version rather than losing the file.
                 Some(p) => {

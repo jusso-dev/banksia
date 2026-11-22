@@ -136,6 +136,10 @@ fn principal_path(tag: &str) -> String {
     format!("principals/{tag}")
 }
 
+fn alias_path(upn_tag: &str) -> String {
+    format!("aliases/{upn_tag}")
+}
+
 /// Summary used for listing without opening manifests.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotRef {
@@ -148,6 +152,15 @@ impl Repository {
     pub async fn save_snapshot(&self, snap: &Snapshot) -> Result<()> {
         let p = principal_path(&snap.principal_tag);
         self.put_doc(&p, &snap.principal).await?;
+        // Write-once alias per UPN, so lookups keep working after a rename.
+        if let Some(upn) = &snap.principal.upn {
+            let alias = alias_path(
+                &self
+                    .keys()
+                    .id_hex("upn alias", upn.to_ascii_lowercase().as_bytes())[..32],
+            );
+            self.put_doc(&alias, &snap.principal_tag).await?;
+        }
         let path = snapshot_path(&snap.principal_tag, snap.workload, &snap.id);
         if self.put_doc(&path, snap).await? == crate::store::PutOutcome::AlreadyExisted {
             bail!("snapshot {} already exists", snap.id);
@@ -212,6 +225,16 @@ impl Repository {
         let direct = self.principal_tag(upn_or_id);
         if let Some(p) = self.principal(&direct).await? {
             return Ok(Some((direct, p)));
+        }
+        let alias = alias_path(
+            &self
+                .keys()
+                .id_hex("upn alias", upn_or_id.to_ascii_lowercase().as_bytes())[..32],
+        );
+        if let Some(tag) = self.get_doc::<String>(&alias).await?
+            && let Some(p) = self.principal(&tag).await?
+        {
+            return Ok(Some((tag, p)));
         }
         for p in self.list("principals/").await? {
             let Some(tag) = p.strip_prefix("principals/") else {
