@@ -16,6 +16,11 @@ url = "2"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "query", "http2", "stream"] }
+url = "2"
+percent-encoding = "2"
+aws-lc-rs = "1"
+axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "fs", "net"] }
 object_store = { version = "0.14", features = ["azure", "aws"] }
 bytes = "1"
@@ -36,6 +41,8 @@ clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 
 banksia-core = { path = "crates/banksia-core" }
+banksia-fakegraph = { path = "crates/banksia-fakegraph" }
+banksia-quickxor = { path = "crates/banksia-quickxor" }
 
 [profile.release]
 lto = "thin"
