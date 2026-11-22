@@ -191,8 +191,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "banksia-core",
+ "banksia-fakegraph",
  "clap",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -203,6 +205,9 @@ name = "banksia-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "banksia-fakegraph",
+ "banksia-graph",
+ "banksia-quickxor",
  "base64 0.22.1",
  "bytes",
  "chacha20poly1305",

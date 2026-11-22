@@ -40,6 +40,7 @@ clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 
 banksia-core = { path = "crates/banksia-core" }
+banksia-graph = { path = "crates/banksia-graph" }
 banksia-fakegraph = { path = "crates/banksia-fakegraph" }
 banksia-quickxor = { path = "crates/banksia-quickxor" }
 

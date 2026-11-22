@@ -29,6 +29,9 @@ toml.workspace = true
 time.workspace = true
 url.workspace = true
 tracing.workspace = true
+banksia-graph.workspace = true
+banksia-quickxor.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+banksia-fakegraph.workspace = true

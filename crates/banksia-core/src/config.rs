@@ -330,6 +330,22 @@ impl Config {
                 bail!("backup.users: empty id");
             }
         }
+        if self.graph.allow_insecure_http_for_tests {
+            let host = self
+                .graph
+                .base_url
+                .split("://")
+                .nth(1)
+                .unwrap_or("")
+                .split(['/', ':'])
+                .next()
+                .unwrap_or("");
+            if !matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
+                bail!(
+                    "graph.allow_insecure_http_for_tests is only permitted for a loopback base_url"
+                );
+            }
+        }
         if self.graph.concurrency == 0 {
             bail!("graph.concurrency must be at least 1");
         }
