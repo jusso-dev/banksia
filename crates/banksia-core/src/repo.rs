@@ -34,6 +34,15 @@ pub struct RepoConfig {
 }
 
 /// Reference to stored content: ordered chunk ids plus whole-content hashes.
+impl RepoConfig {
+    fn canonical(&self) -> String {
+        format!(
+            "{}\n{}\n{}\n{}\n{}",
+            self.format, self.version, self.repo_id, self.created, self.chunk_size
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ContentRef {
     pub chunks: Vec<String>,
@@ -61,14 +70,15 @@ impl Repository {
         let keys = master.derive();
         let mut id = [0u8; 16];
         crate::crypto::fill_random(&mut id);
-        let config = RepoConfig {
+        let mut config = RepoConfig {
             format: "banksia".into(),
             version: FORMAT_VERSION,
             repo_id: hex::encode(id),
             created: crate::time::now_rfc3339(),
             chunk_size: CHUNK_SIZE,
-            key_check: keys.key_check(),
+            key_check: String::new(),
         };
+        config.key_check = keys.key_check(&config.canonical());
         let body = serde_json::to_vec_pretty(&config)?;
         if store.put_create(CONFIG_PATH, body).await? == PutOutcome::AlreadyExisted {
             bail!("a Banksia repository already exists at {}", store.label());
@@ -97,8 +107,11 @@ impl Repository {
             bail!("unsupported repository format version {}", config.version);
         }
         let keys = master.derive();
-        if keys.key_check() != config.key_check {
-            bail!("the master key does not match this repository");
+        if keys.key_check(&config.canonical()) != config.key_check {
+            bail!("the master key does not match this repository, or its config was altered");
+        }
+        if config.chunk_size == 0 || config.chunk_size > 64 * 1024 * 1024 {
+            bail!("repository chunk size is out of range");
         }
         Ok(Self {
             store,
@@ -165,7 +178,8 @@ impl Repository {
 
     /// Read content back and verify size and SHA-256.
     pub async fn read_content(&self, r: &ContentRef) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(r.size as usize);
+        // Capacity is bounded: the size field is not trusted until verified.
+        let mut out = Vec::with_capacity((r.size as usize).min(64 * 1024 * 1024));
         let mut h = Sha256Stream::default();
         for id in &r.chunks {
             let c = self.get_chunk(id).await?;
@@ -278,6 +292,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("does not match"));
+    }
+
+    #[tokio::test]
+    async fn altered_repo_config_is_rejected() {
+        use object_store::ObjectStoreExt;
+        let inner: std::sync::Arc<dyn object_store::ObjectStore> =
+            std::sync::Arc::new(object_store::memory::InMemory::new());
+        let store = Store::from_object_store(inner.clone(), "", "m");
+        let key = MasterKey::generate();
+        let repo = Repository::init(store.clone(), &key).await.unwrap();
+        let mut cfg = repo.config().clone();
+        cfg.repo_id = "0".repeat(32);
+        inner
+            .put(
+                &CONFIG_PATH.into(),
+                serde_json::to_vec(&cfg).unwrap().into(),
+            )
+            .await
+            .unwrap();
+        assert!(Repository::open(store, &key).await.is_err());
     }
 
     #[tokio::test]

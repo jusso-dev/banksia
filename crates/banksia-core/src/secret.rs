@@ -67,7 +67,7 @@ impl SecretSource {
     /// Load the secret. Files must not be readable by group or others on Unix.
     pub fn load(&self, what: &str) -> Result<Secret> {
         self.validate(what)?;
-        let raw = if let Some(name) = &self.env {
+        let raw = Zeroizing::new(if let Some(name) = &self.env {
             std::env::var(name)
                 .with_context(|| format!("{what}: environment variable {name} is not set"))?
         } else {
@@ -75,7 +75,7 @@ impl SecretSource {
             check_private_file(path).with_context(|| format!("{what}: {}", path.display()))?;
             std::fs::read_to_string(path)
                 .with_context(|| format!("{what}: cannot read {}", path.display()))?
-        };
+        });
         let value = raw.trim().to_string();
         if value.is_empty() {
             bail!("{what}: secret is empty");

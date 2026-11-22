@@ -292,6 +292,13 @@ impl Config {
         if self.tenant.tenant_id.trim().is_empty() {
             bail!("tenant.tenant_id is empty");
         }
+        let insecure = self.graph.allow_insecure_http_for_tests;
+        check_endpoint(
+            "tenant.authority_host",
+            &self.tenant.authority_host,
+            insecure,
+        )?;
+        check_endpoint("graph.base_url", &self.graph.base_url, insecure)?;
         self.key.master_key.validate("key.master_key")?;
         self.backup.auth.validate("backup.auth")?;
         if let Some(a) = &self.restore.auth {
@@ -327,6 +334,30 @@ impl Config {
             bail!("graph.concurrency must be at least 1");
         }
         Ok(())
+    }
+}
+
+/// Endpoints must be https with no credentials in the URL. Plain http is
+/// only accepted, with the test flag set, for a loopback host.
+fn check_endpoint(what: &str, value: &str, allow_insecure: bool) -> Result<()> {
+    let u =
+        url::Url::parse(value).map_err(|e| anyhow::anyhow!("{what} is not a valid URL: {e}"))?;
+    if !u.username().is_empty() || u.password().is_some() {
+        bail!("{what} must not contain credentials");
+    }
+    let loopback = match u.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    match u.scheme() {
+        "https" => Ok(()),
+        "http" if allow_insecure && loopback => Ok(()),
+        "http" if allow_insecure => {
+            bail!("{what}: graph.allow_insecure_http_for_tests only permits a loopback host")
+        }
+        _ => bail!("{what} must use https"),
     }
 }
 
@@ -402,6 +433,25 @@ id = "adele@contoso.onmicrosoft.com"
             !err.contains("abc123"),
             "error must not echo the secret: {err}"
         );
+    }
+
+    #[test]
+    fn endpoint_guard() {
+        assert!(check_endpoint("x", "https://graph.microsoft.com/v1.0", false).is_ok());
+        assert!(check_endpoint("x", "http://graph.microsoft.com/v1.0", false).is_err());
+        assert!(check_endpoint("x", "http://127.0.0.1:9/v1.0", false).is_err());
+        assert!(check_endpoint("x", "http://127.0.0.1:9/v1.0", true).is_ok());
+        assert!(check_endpoint("x", "http://[::1]:9/v1.0", true).is_ok());
+        assert!(check_endpoint("x", "http://localhost/v1.0", true).is_ok());
+        // Userinfo tricks and non-loopback hosts are refused.
+        assert!(check_endpoint("x", "http://localhost:80@attacker.example/v1.0", true).is_err());
+        assert!(check_endpoint("x", "https://user:pw@graph.microsoft.com/v1.0", false).is_err());
+        assert!(check_endpoint("x", "http://10.0.0.5/v1.0", true).is_err());
+        let t = BASE.replace(
+            "[tenant]\n",
+            "[tenant]\nauthority_host = \"http://login.example\"\n",
+        );
+        assert!(Config::parse(&t).is_err(), "plain http authority refused");
     }
 
     #[test]

@@ -170,9 +170,10 @@ impl Keys {
         self.id_hex("blob", chunk)
     }
 
-    /// Value stored in the repository config to detect a wrong key early.
-    pub fn key_check(&self) -> String {
-        self.id_hex("key check", b"banksia")
+    /// MAC over the repository config fields. Detects a wrong key early and
+    /// any edit to the plaintext config (for example a changed repository id).
+    pub fn key_check(&self, canonical_config: &str) -> String {
+        self.id_hex("repo config v1", canonical_config.as_bytes())
     }
 
     /// HMAC-SHA256 under the evidence key, hex encoded.
