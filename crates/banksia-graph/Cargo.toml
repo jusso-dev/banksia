@@ -27,3 +27,4 @@ percent-encoding.workspace = true
 
 [dev-dependencies]
 banksia-fakegraph.workspace = true
+bytes.workspace = true

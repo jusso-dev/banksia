@@ -233,7 +233,8 @@ async fn upload_session_in_fragments() {
             .unwrap()
             .is_none()
     );
-    // A repeated fragment is accepted.
+    // Resending a committed fragment gets 416 from Graph; the client reads
+    // nextExpectedRanges and treats the fragment as done instead of failing.
     assert!(
         g.upload_fragment(&sess.upload_url, data[..600].to_vec().into(), 0, total)
             .await
@@ -248,4 +249,68 @@ async fn upload_session_in_fragments() {
     assert_eq!(done["size"], 1000);
     assert_eq!(t.file_at(&u, "big.bin").unwrap(), data);
     assert_eq!(t.token_leaks(), 0);
+}
+
+#[tokio::test]
+async fn lost_fragment_response_resumes_from_next_expected_range() {
+    let t = FakeTenant::start().await;
+    let u = t.add_user("a@x", "A");
+    let g = client(&t, "c", "s");
+    let sess: banksia_graph::types::UploadSession = g
+        .post_json(
+            &format!("/drives/{}/root:/big.bin:/createUploadSession", u.drive_id),
+            &serde_json::json!({"item": {"@microsoft.graph.conflictBehavior": "fail"}}),
+        )
+        .await
+        .unwrap();
+    let data: Vec<u8> = (0..1000u32).map(|i| (i * 7) as u8).collect();
+    t.drop_next_upload_response();
+    // The first fragment is committed but its response is lost; the client
+    // asks the session and moves on without resending it.
+    assert!(
+        g.upload_fragment(&sess.upload_url, data[..600].to_vec().into(), 0, 1000)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let done = g
+        .upload_fragment(&sess.upload_url, data[600..].to_vec().into(), 600, 1000)
+        .await
+        .unwrap();
+    assert!(done.is_some());
+    assert_eq!(t.file_at(&u, "big.bin").unwrap(), data);
+    assert!(
+        g.upload_fragment(&sess.upload_url, bytes::Bytes::new(), 0, 1000)
+            .await
+            .is_err(),
+        "empty fragment refused"
+    );
+}
+
+#[tokio::test]
+async fn dot_segments_cannot_escape_a_drive_path() {
+    let t = FakeTenant::start().await;
+    let u = t.add_user("a@x", "A");
+    t.add_file(&u, "secret.txt", b"x");
+    let g = client(&t, "c", "s");
+    // Built with drive_path from an untrusted name...
+    let p = banksia_graph::drive_path("Banksia Restore/p1/../../secret.txt");
+    let e = g
+        .get_json::<DriveItem>(&format!("/drives/{}/root:/{p}", u.drive_id))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, GraphError::Refused(_)), "{e}");
+    // ...or already percent-encoded dot segments in a raw path.
+    for raw in ["a/%2E%2E/secret.txt", "a/%2e./secret.txt"] {
+        let e = g
+            .get_json::<DriveItem>(&format!("/drives/{}/root:/{raw}", u.drive_id))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, GraphError::Refused(_)), "{raw}: {e}");
+    }
+    // A literal "%2E%2E" file name is encoded again by drive_path, so it is safe.
+    assert_eq!(banksia_graph::drive_path("%2E%2E"), "%252E%252E");
+    let e = g.get_json::<User>("/users/../drives").await.unwrap_err();
+    assert!(matches!(e, GraphError::Refused(_)));
+    assert_eq!(t.token_requests(), 0, "refused before any token is used");
 }

@@ -104,6 +104,7 @@ struct TenantState {
     faults: Vec<Fault>,
     corrupt_downloads: HashSet<String>,
     corrupt_next_upload: bool,
+    drop_next_upload_response: bool,
     requests: Vec<String>,
     token_requests: usize,
     token_leaks: usize,
@@ -200,6 +201,11 @@ impl FakeTenant {
     /// Serve different bytes for this item than its reported hash.
     pub fn corrupt_download(&self, item_id: &str) {
         self.st().corrupt_downloads.insert(item_id.to_string());
+    }
+
+    /// Commit the next upload fragment but answer 504, as if the response was lost.
+    pub fn drop_next_upload_response(&self) {
+        self.st().drop_next_upload_response = true;
     }
 
     /// Flip a byte in the next uploaded file.
@@ -638,6 +644,18 @@ async fn handle(
         if headers.contains_key(header::AUTHORIZATION) {
             s.token_leaks += 1;
             return err(400, "tokenNotAllowed", "upload URL received a bearer token");
+        }
+        if method == Method::GET {
+            return match s.uploads.get(sid) {
+                Some(sess) => ok(json!({"nextExpectedRanges": [format!("{}-", sess.data.len())]})),
+                None => err(404, "itemNotFound", "upload session not found"),
+            };
+        }
+        if s.drop_next_upload_response {
+            // Commit the fragment, then fail as if the response was lost.
+            s.drop_next_upload_response = false;
+            let _ = upload_fragment(&mut s, sid, &headers, &body);
+            return err(504, "GatewayTimeout", "injected lost response");
         }
         return upload_fragment(&mut s, sid, &headers, &body);
     }
@@ -1300,16 +1318,12 @@ fn upload_fragment(s: &mut TenantState, sid: &str, headers: &HeaderMap, body: &[
     sess.total = Some(total);
     let have = sess.data.len() as u64;
     if start < have {
-        // Repeated fragment: accept idempotently if it matches.
-        if sess.data[start as usize..(end as usize + 1).min(sess.data.len())]
-            != body[..((have.min(end + 1) - start) as usize)]
-        {
-            return err(
-                416,
-                "invalidRange",
-                "fragment overlaps with different content",
-            );
-        }
+        // Graph rejects a range it has already committed.
+        return err(
+            416,
+            "invalidRange",
+            "The uploaded fragment overlaps with data that has already been received.",
+        );
     } else if start > have {
         return err(416, "invalidRange", "fragment out of order");
     } else {

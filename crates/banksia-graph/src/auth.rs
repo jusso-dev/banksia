@@ -166,16 +166,13 @@ impl AppAuth {
                 form.push(("client_assertion", assertion.to_string()));
             }
         }
-        let resp = http
-            .post(&self.token_url)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| GraphError::Auth(format!("token request failed: {}", e.without_url())))?;
-        // Scrub the form (it may hold the client secret) as soon as it has been sent.
+        let sent = http.post(&self.token_url).form(&form).send().await;
+        // Scrub the form (it may hold the client secret) whether or not the send worked.
         for (_, v) in form.iter_mut() {
             zeroize::Zeroize::zeroize(v);
         }
+        let resp = sent
+            .map_err(|e| GraphError::Auth(format!("token request failed: {}", e.without_url())))?;
         let status = resp.status();
         let body = resp.bytes().await.map_err(|e| {
             GraphError::Auth(format!("token response unreadable: {}", e.without_url()))

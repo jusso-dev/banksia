@@ -90,13 +90,15 @@ impl GraphClient {
             return Err(GraphError::Refused("Graph base URL must use https".into()));
         }
         let ua = concat!("banksia/", env!("CARGO_PKG_VERSION"));
+        // An idle read timeout, not a total timeout: large downloads can take
+        // far longer than any fixed limit, but a stalled connection cannot.
         let build = |redirect| {
             reqwest::Client::builder()
                 .user_agent(ua)
                 .https_only(!settings.allow_http)
                 .redirect(redirect)
                 .connect_timeout(Duration::from_secs(30))
-                .timeout(Duration::from_secs(600))
+                .read_timeout(Duration::from_secs(120))
                 .build()
                 .map_err(|e| GraphError::Transport(e.to_string()))
         };
@@ -118,6 +120,19 @@ impl GraphClient {
     /// Resolve a relative path (`/users/x`) or an absolute Graph link
     /// (`@odata.nextLink`). Absolute links must share the Graph origin.
     pub fn resolve(&self, path_or_url: &str) -> Result<Url, GraphError> {
+        // Refuse dot segments before parsing: URL normalisation would
+        // silently remove them and move the request to a different resource.
+        let path_part = path_or_url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        if path_part.split('/').any(crate::is_dot_segment) {
+            return Err(GraphError::Refused(
+                "path contains a '.' or '..' segment".into(),
+            ));
+        }
         if path_or_url.starts_with("https://") || path_or_url.starts_with("http://") {
             let u = Url::parse(path_or_url)
                 .map_err(|e| GraphError::Refused(format!("invalid link: {e}")))?;
@@ -459,9 +474,13 @@ impl GraphClient {
         }
     }
 
-    /// Upload one fragment to an upload session. Fragment uploads are
-    /// idempotent for the same byte range. Returns the drive item JSON when
-    /// the final fragment completes the upload.
+    /// Upload one fragment to an upload session. Returns the drive item JSON
+    /// when the final fragment completes the upload.
+    ///
+    /// If a fragment's response is lost (timeout, 5xx, 416), the session is
+    /// asked for `nextExpectedRanges` and the fragment is resent only from the
+    /// first byte the server still needs, so a committed fragment is never
+    /// resent as a whole.
     pub async fn upload_fragment(
         &self,
         upload_url: &str,
@@ -469,20 +488,97 @@ impl GraphClient {
         start: u64,
         total: u64,
     ) -> Result<Option<Value>, GraphError> {
+        if data.is_empty() {
+            return Err(GraphError::Refused("empty upload fragment".into()));
+        }
         let url = Url::parse(upload_url)
             .map_err(|e| GraphError::Decode(format!("invalid upload URL: {e}")))?;
-        let end = start + data.len() as u64 - 1;
-        let range = format!("bytes {start}-{end}/{total}");
-        let resp = self
-            .anon_request(Method::PUT, url, Some((data, range)))
-            .await?;
-        let resp = error_for_status(resp).await?;
-        let st = resp.status();
-        if st == StatusCode::OK || st == StatusCode::CREATED {
-            return Ok(Some(decode(resp).await?));
+        if url.scheme() != "https" && !self.settings.allow_http {
+            return Err(GraphError::Refused("upload URL must use https".into()));
         }
-        Ok(None)
+        let end = start + data.len() as u64;
+        let mut offset = start;
+        let mut attempt = 0u32;
+        loop {
+            let piece = data.slice((offset - start) as usize..);
+            let range = format!("bytes {offset}-{}/{total}", end - 1);
+            let sent = {
+                let _permit = self.sem.acquire().await.expect("semaphore is never closed");
+                self.anon
+                    .put(url.clone())
+                    .header(header::CONTENT_RANGE, range)
+                    .header(header::CONTENT_LENGTH, piece.len())
+                    .body(piece)
+                    .send()
+                    .await
+            };
+            let retry_wait = match sent {
+                Ok(resp) => {
+                    let st = resp.status();
+                    if st == StatusCode::OK || st == StatusCode::CREATED {
+                        return Ok(Some(decode(resp).await?));
+                    }
+                    if st == StatusCode::ACCEPTED {
+                        return Ok(None);
+                    }
+                    if !matches!(st.as_u16(), 416 | 429 | 500 | 502 | 503 | 504) {
+                        return Err(error_for_status(resp).await.err().unwrap_or_else(|| {
+                            GraphError::Decode(format!("unexpected upload status {st}"))
+                        }));
+                    }
+                    if attempt >= self.settings.max_retries {
+                        return Err(error_for_status(resp).await.err().unwrap_or_else(|| {
+                            GraphError::Decode(format!("upload failed with {st}"))
+                        }));
+                    }
+                    self.retry_after(&resp)
+                        .unwrap_or_else(|| self.backoff(attempt))
+                }
+                Err(e) if attempt < self.settings.max_retries => {
+                    let _ = e;
+                    self.backoff(attempt)
+                }
+                Err(e) => return Err(GraphError::Transport(e.without_url().to_string())),
+            };
+            attempt += 1;
+            tokio::time::sleep(retry_wait).await;
+            // Ask the session what it still needs before resending.
+            match self.upload_status(&url).await? {
+                UploadStatus::Complete(item) => return Ok(Some(item)),
+                UploadStatus::Next(n) if n >= end => return Ok(None),
+                UploadStatus::Next(n) if n >= start => offset = n,
+                UploadStatus::Next(n) => {
+                    return Err(GraphError::Decode(format!(
+                        "upload session expects byte {n}, before this fragment ({start})"
+                    )));
+                }
+            }
+        }
     }
+
+    async fn upload_status(&self, url: &Url) -> Result<UploadStatus, GraphError> {
+        let resp = self.anon_request(Method::GET, url.clone(), None).await?;
+        let resp = error_for_status(resp).await?;
+        let v: Value = decode(resp).await?;
+        if v.get("id").is_some() && v.get("nextExpectedRanges").is_none() {
+            return Ok(UploadStatus::Complete(v));
+        }
+        let first = v["nextExpectedRanges"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|r| r.as_str())
+            .and_then(|r| r.split('-').next())
+            .and_then(|n| n.parse::<u64>().ok())
+            .ok_or_else(|| {
+                GraphError::Decode("upload session status has no nextExpectedRanges".into())
+            })?;
+        Ok(UploadStatus::Next(first))
+    }
+}
+
+enum UploadStatus {
+    Complete(Value),
+    Next(u64),
 }
 
 /// A streaming response body.
