@@ -18,8 +18,9 @@ use std::collections::BTreeSet;
 
 pub const PLAN_VERSION: u32 = 1;
 pub const RESTORE_ROOT: &str = "Banksia Restore";
-/// Minimum number of plan hash characters accepted as approval.
-pub const MIN_APPROVAL_PREFIX: usize = 12;
+/// Approval is the full SHA-256 of the plan file. Prefixes are refused: a
+/// short prefix can be matched by a different plan with enough effort.
+pub const APPROVAL_LEN: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -204,6 +205,9 @@ pub fn build_plan(repo: &Repository, req: PlanRequest<'_>) -> Result<RestorePlan
                     }
                     Selection::MailFolder(path) => {
                         let want = components(path);
+                        if want.is_empty() {
+                            bail!("folder path is empty; use --all to restore the whole mailbox");
+                        }
                         let folders: BTreeSet<String> = mail
                             .folders
                             .iter()
@@ -393,10 +397,10 @@ pub fn plan_hash(bytes: &[u8]) -> String {
 pub fn verify_approval(bytes: &[u8], approval: &str) -> Result<(RestorePlan, String)> {
     let hash = plan_hash(bytes);
     let a = approval.trim().to_ascii_lowercase();
-    if a.len() < MIN_APPROVAL_PREFIX || !a.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("approval must be at least {MIN_APPROVAL_PREFIX} hex characters of the plan hash");
+    if a.len() != APPROVAL_LEN || !a.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("approval must be the full {APPROVAL_LEN}-character plan hash");
     }
-    if !hash.starts_with(&a) {
+    if hash != a {
         bail!(
             "approval does not match this plan (the plan was changed, or the wrong plan was given)"
         );
@@ -406,5 +410,126 @@ pub fn verify_approval(bytes: &[u8], approval: &str) -> Result<(RestorePlan, Str
     if plan.version != PLAN_VERSION {
         bail!("unsupported plan version {}", plan.version);
     }
+    if !valid_plan_id(&plan.plan_id) {
+        bail!("plan id is not valid");
+    }
     Ok((plan, hash))
+}
+
+/// Plan ids are generated as `YYYYMMDDTHHMMSSZ-<hex>`. Anything else is refused,
+/// because the id is used in local file names.
+pub fn valid_plan_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Check that a plan is exactly what [`build_plan`] would produce for its
+/// source snapshot: every action must come from that snapshot, every
+/// destination must sit inside the declared restore root, and the summary
+/// must match the actions. A hand-edited plan cannot smuggle in other data,
+/// destinations or a misleading summary.
+pub fn validate_against_snapshot(plan: &RestorePlan, snap: &Snapshot) -> Result<()> {
+    if snap.principal_tag != plan.source.principal_tag
+        || snap.workload != plan.source.workload
+        || snap.id != plan.source.snapshot_id
+    {
+        bail!("plan source does not match the snapshot");
+    }
+    let root: &[String] = match &plan.mode {
+        RestoreMode::InPlace => &[],
+        RestoreMode::Alternate { root } => {
+            if root.len() != 2 || root[0] != RESTORE_ROOT || root[1] != plan.plan_id {
+                bail!("plan restore root must be {RESTORE_ROOT}/<plan id>");
+            }
+            root
+        }
+    };
+    let comps_ok = |c: &[String]| c.iter().all(|x| banksia_graph::safe_component(x));
+    // Folder actions may create the restore root itself (each of its
+    // prefixes); everything else must sit strictly inside it.
+    let is_root_prefix =
+        |c: &[String]| !c.is_empty() && c.len() <= root.len() && c == &root[..c.len()];
+    let under_root = |c: &[String]| c.len() > root.len() && c[..root.len()] == *root;
+    let mut sum = PlanSummary::default();
+    for a in &plan.actions {
+        match (a, snap.workload) {
+            (Action::MailFolder { path }, Workload::Mail) => {
+                if !comps_ok(path) || !(under_root(path) || is_root_prefix(path)) {
+                    bail!("plan has an invalid mail folder path");
+                }
+                sum.mail_folders += 1;
+            }
+            (
+                Action::Message {
+                    source_id,
+                    folder,
+                    internet_message_id,
+                    subject,
+                    content,
+                },
+                Workload::Mail,
+            ) => {
+                let mail = snap.mail.as_ref().context("snapshot has no mail")?;
+                let m = mail
+                    .messages
+                    .iter()
+                    .find(|m| &m.id == source_id)
+                    .context("plan names a message that is not in the snapshot")?;
+                let want = [root.to_vec(), mail_components(mail, &m.folder_id)].concat();
+                if &m.content != content
+                    || &m.internet_message_id != internet_message_id
+                    || &m.subject != subject
+                    || *folder != want
+                {
+                    bail!("plan message does not match the snapshot");
+                }
+                sum.messages += 1;
+                sum.bytes += content.size;
+            }
+            (Action::DriveFolder { path }, Workload::Drive) => {
+                let c = components(path);
+                if !comps_ok(&c) || !(under_root(&c) || is_root_prefix(&c)) || c.join("/") != *path
+                {
+                    bail!("plan has an invalid drive folder path");
+                }
+                sum.drive_folders += 1;
+            }
+            (
+                Action::File {
+                    source_id,
+                    path,
+                    size,
+                    quick_xor_hash,
+                    content,
+                },
+                Workload::Drive,
+            ) => {
+                let drive = snap
+                    .drive
+                    .as_ref()
+                    .context("snapshot has no OneDrive data")?;
+                let e = drive
+                    .items
+                    .iter()
+                    .find(|i| &i.id == source_id && !i.folder)
+                    .context("plan names a file that is not in the snapshot")?;
+                let want = [root.to_vec(), components(&e.path)].concat().join("/");
+                if e.content.as_ref() != Some(content)
+                    || e.size != *size
+                    || content.size != *size
+                    || &e.quick_xor_hash != quick_xor_hash
+                    || *path != want
+                    || !comps_ok(&components(path))
+                {
+                    bail!("plan file does not match the snapshot");
+                }
+                sum.files += 1;
+                sum.bytes += size;
+            }
+            _ => bail!("plan action does not match the snapshot workload"),
+        }
+    }
+    if sum != plan.summary {
+        bail!("plan summary does not match its actions");
+    }
+    Ok(())
 }

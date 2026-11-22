@@ -105,7 +105,7 @@ async fn mail_folder_restore_to_alternate_location_and_rerun() {
         false,
     );
     assert_eq!(plan.summary.messages, 2);
-    let (plan2, hash2) = restore::verify_approval(&bytes, &hash[..12]).unwrap();
+    let (plan2, hash2) = restore::verify_approval(&bytes, &hash).unwrap();
     assert_eq!(plan2, plan);
     assert_eq!(hash2, hash);
 
@@ -246,7 +246,7 @@ async fn refusals_disabled_allowlist_and_tampered_plan() {
     let e = restore::verify_approval(&tampered, &hash).unwrap_err();
     assert!(e.to_string().contains("does not match"), "{e}");
     assert!(
-        restore::verify_approval(&bytes, &hash[..8]).is_err(),
+        restore::verify_approval(&bytes, &hash[..63]).is_err(),
         "short approvals are refused"
     );
 
@@ -375,4 +375,147 @@ async fn failed_upload_verification_is_reported() {
         .find(|x| x.outcome == Outcome::Failed)
         .unwrap();
     assert!(f.detail.as_ref().unwrap().contains("quickXorHash"), "{f:?}");
+}
+
+#[tokio::test]
+async fn tampered_plans_are_refused_even_with_matching_approval() {
+    let r = setup().await;
+    let s = snap(&r, Workload::Drive).await;
+    let c = ctx(&r, true, &[&r.target.upn]);
+    let (plan, _, _) = plan_for(
+        &r,
+        &s,
+        Selection::DrivePath("Documents/readme.md".into()),
+        &r.target,
+        false,
+    );
+
+    // An operator rewrites the plan and approves their own edit. Each edit
+    // gets a fresh, matching hash, so only plan validation can stop it.
+    let mut cases: Vec<(&str, restore::RestorePlan)> = Vec::new();
+    let mut p = plan.clone();
+    if let restore::Action::File { path, .. } = &mut p.actions.last_mut().unwrap() {
+        *path = "Banksia Restore/x/../../readme.md".into();
+    }
+    cases.push(("dot segment escape", p));
+    let mut p = plan.clone();
+    if let restore::Action::File { path, .. } = &mut p.actions.last_mut().unwrap() {
+        *path = "Documents/readme.md".into();
+    }
+    cases.push(("destination outside the restore root", p));
+    let mut p = plan.clone();
+    p.summary.files = 0;
+    cases.push(("misleading summary", p));
+    let mut p = plan.clone();
+    if let restore::Action::File { size, .. } = &mut p.actions.last_mut().unwrap() {
+        *size = 1;
+    }
+    cases.push(("size mismatch", p));
+    let mut p = plan.clone();
+    p.plan_id = "../../checkpoints/x".into();
+    cases.push(("plan id traversal", p));
+
+    for (what, p) in cases {
+        let bytes = restore::encode_plan(&p).unwrap();
+        let hash = restore::plan_hash(&bytes);
+        let verdict = match restore::verify_approval(&bytes, &hash) {
+            Err(e) => Err(e),
+            Ok((p, h)) => apply(&c, &p, &h, false).await.map(|_| ()),
+        };
+        assert!(verdict.is_err(), "{what} was accepted");
+    }
+    assert_eq!(r.env.tenant.file_count(&r.target), 0);
+}
+
+#[tokio::test]
+async fn small_file_restore_never_overwrites_even_though_put_replaces() {
+    let r = setup().await;
+    let s = snap(&r, Workload::Drive).await;
+    let id = s
+        .drive
+        .as_ref()
+        .unwrap()
+        .by_path("Documents/readme.md")
+        .unwrap()
+        .id
+        .clone();
+    r.env.tenant.update_file(&id, b"edited after backup");
+    let (plan, _, hash) = plan_for(
+        &r,
+        &s,
+        Selection::DrivePath("Documents/readme.md".into()),
+        &r.u,
+        true,
+    );
+    let rep = apply(&ctx(&r, true, &[&r.u.upn]), &plan, &hash, false)
+        .await
+        .unwrap();
+    assert!(rep.ok(), "{:#?}", rep.results);
+    assert_eq!(
+        r.env.tenant.file_at(&r.u, "Documents/readme.md").unwrap(),
+        b"edited after backup"
+    );
+    assert_eq!(
+        r.env.tenant.file_at(&r.u, "Documents/readme 1.md").unwrap(),
+        b"# readme"
+    );
+}
+
+#[tokio::test]
+async fn unrelated_identical_sibling_does_not_count_as_restored() {
+    let r = setup().await;
+    let s = snap(&r, Workload::Drive).await;
+    let id = s
+        .drive
+        .as_ref()
+        .unwrap()
+        .by_path("Documents/readme.md")
+        .unwrap()
+        .id
+        .clone();
+    r.env.tenant.update_file(&id, b"changed");
+    // A different file with the backed-up content sits beside it.
+    r.env
+        .tenant
+        .add_file(&r.u, "Documents/template.md", b"# readme");
+    let (plan, _, hash) = plan_for(
+        &r,
+        &s,
+        Selection::DrivePath("Documents/readme.md".into()),
+        &r.u,
+        true,
+    );
+    let rep = apply(&ctx(&r, true, &[&r.u.upn]), &plan, &hash, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        rep.results
+            .iter()
+            .filter(|x| x.outcome == Outcome::CreatedRenamed)
+            .count(),
+        1,
+        "{:#?}",
+        rep.results
+    );
+}
+
+#[tokio::test]
+async fn empty_folder_selection_is_refused() {
+    let r = setup().await;
+    let s = snap(&r, Workload::Mail).await;
+    for f in ["", "/"] {
+        let e = restore::build_plan(
+            &r.env.repo,
+            PlanRequest {
+                snapshot: &s,
+                selection: Selection::MailFolder(f.into()),
+                target_user: r.target.upn.clone(),
+                target_object_id: r.target.id.clone(),
+                in_place: false,
+                created_by: "t".into(),
+                purpose: "t".into(),
+            },
+        );
+        assert!(e.is_err(), "{f:?}");
+    }
 }

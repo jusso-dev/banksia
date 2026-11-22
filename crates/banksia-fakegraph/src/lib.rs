@@ -1278,11 +1278,10 @@ fn drive_put_content(
             "use an upload session for files over 4 MiB",
         );
     }
-    let conflict = q
-        .get("@microsoft.graph.conflictBehavior")
-        .cloned()
-        .unwrap_or_else(|| "replace".into());
-    store_file(s, drive, path, &conflict, body.to_vec())
+    // Like Graph, simple PUT /content replaces an existing file. The
+    // conflictBehavior query parameter is not honoured here.
+    let _ = q;
+    store_file(s, drive, path, "replace", body.to_vec())
 }
 
 fn create_upload_session(s: &mut TenantState, drive: &str, path: &str, body: &[u8]) -> Response {

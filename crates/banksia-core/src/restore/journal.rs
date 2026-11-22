@@ -23,6 +23,9 @@ pub struct Journal {
 
 impl Journal {
     pub fn open(state_dir: &Path, keys: &Keys, plan_id: &str, plan_hash: &str) -> Result<Self> {
+        if !super::valid_plan_id(plan_id) {
+            anyhow::bail!("plan id is not valid");
+        }
         let dir = state_dir.join("restore-journal");
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("cannot create {}", dir.display()))?;
@@ -55,7 +58,11 @@ impl Journal {
         );
         let plain = serde_json::to_vec(&self.done)?;
         let sealed = self.keys.seal(&self.aad, &plain)?;
-        let tmp = self.path.with_extension("tmp");
+        let mut r = [0u8; 6];
+        crate::crypto::fill_random(&mut r);
+        let tmp =
+            self.path
+                .with_extension(format!("{}.{}.tmp", std::process::id(), hex::encode(r)));
         std::fs::write(&tmp, sealed)?;
         std::fs::rename(&tmp, &self.path)?;
         Ok(())

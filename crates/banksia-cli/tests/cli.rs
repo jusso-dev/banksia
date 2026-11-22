@@ -242,10 +242,21 @@ async fn restore_plan_dry_run_and_apply() {
         "--plan",
         plan.to_str().unwrap(),
         "--approve",
-        "000000000000",
+        &"0".repeat(64),
     ]);
     assert_eq!(c, 1);
     assert!(err.contains("does not match"), "{err}");
+    // A prefix of the right hash is not enough.
+    let (c, _, err) = s.run(&[
+        "restore",
+        "apply",
+        "--plan",
+        plan.to_str().unwrap(),
+        "--approve",
+        &hash[..16],
+    ]);
+    assert_eq!(c, 1);
+    assert!(err.contains("full 64-character"), "{err}");
 
     let (c, out, err) = s.run(&[
         "restore",
@@ -253,7 +264,7 @@ async fn restore_plan_dry_run_and_apply() {
         "--plan",
         plan.to_str().unwrap(),
         "--approve",
-        &hash[..12],
+        &hash,
         "--dry-run",
     ]);
     assert_eq!(c, 0, "{out}{err}");

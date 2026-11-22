@@ -77,8 +77,9 @@ enum AuditCommand {
 
 #[derive(Subcommand)]
 enum RestoreCommand {
-    /// Build a restore plan from a snapshot. Reads the repository only and
-    /// writes a plan file. This is the dry run of what would be restored.
+    /// Build a restore plan from a snapshot. Makes no tenant writes: it reads
+    /// the repository, resolves the target with the read-only backup app,
+    /// writes a plan file and records a plan_created audit event.
     Plan {
         /// Source user (UPN or object id) whose backup to restore from.
         #[arg(long)]
@@ -121,7 +122,7 @@ enum RestoreCommand {
     Apply {
         #[arg(long)]
         plan: PathBuf,
-        /// The plan hash, or at least its first 12 hex characters.
+        /// The full 64-character plan hash printed by `restore plan`.
         #[arg(long)]
         approve: String,
         /// Run every check and lookup, then report what would happen. No writes.

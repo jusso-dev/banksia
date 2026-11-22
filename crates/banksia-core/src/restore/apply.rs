@@ -12,8 +12,6 @@ use serde::Serialize;
 use serde_json::json;
 use std::{collections::HashMap, path::PathBuf, time::Instant};
 
-/// Simple PUT limit for drive uploads. Larger files use upload sessions.
-const SIMPLE_UPLOAD_MAX: u64 = 4 * 1024 * 1024;
 /// Graph limits a MIME message create request to about 4 MB after base64.
 pub const MAX_MIME_IMPORT: u64 = 3 * 1024 * 1024;
 
@@ -79,6 +77,21 @@ pub async fn check(ctx: &ApplyContext<'_>, plan: &RestorePlan) -> Result<()> {
     if plan.repo_id != ctx.repo.config().repo_id {
         bail!("plan was made for a different repository");
     }
+    if !super::valid_plan_id(&plan.plan_id) {
+        bail!("plan id is not valid");
+    }
+    // The plan must be exactly what the planner would build from its source
+    // snapshot, so what was approved is what runs.
+    let snap = ctx
+        .repo
+        .load_snapshot(
+            &plan.source.principal_tag,
+            plan.source.workload,
+            &plan.source.snapshot_id,
+        )
+        .await
+        .context("cannot load the plan's source snapshot")?;
+    super::validate_against_snapshot(plan, &snap)?;
     let t = &plan.target;
     let allowed = ctx
         .allowed_targets
@@ -144,6 +157,8 @@ pub async fn apply(
         )
         .await?;
 
+    let _lock = crate::lock::Lock::acquire(&ctx.state_dir, &format!("restore-{}", plan.plan_id))
+        .context("this plan is already being applied by another process")?;
     let mut journal = Journal::open(&ctx.state_dir, ctx.repo.keys(), &plan.plan_id, plan_hash)?;
     let mut ex = Executor {
         ctx,
@@ -237,6 +252,26 @@ pub async fn apply(
 }
 
 type Step = (Outcome, Option<String>, Option<String>);
+
+/// Whether `candidate` looks like OneDrive's conflict rename of `original`:
+/// `name 1.ext` or `name (1).ext`.
+fn is_renamed_copy(original: &str, candidate: &str) -> bool {
+    let (stem, ext) = match original.rfind('.') {
+        Some(i) if i > 0 => (&original[..i], &original[i..]),
+        _ => (original, ""),
+    };
+    let lc = candidate.to_lowercase();
+    let (stem, ext) = (stem.to_lowercase(), ext.to_lowercase());
+    let Some(mid) = lc.strip_prefix(&stem).and_then(|r| r.strip_suffix(&ext)) else {
+        return false;
+    };
+    let n = mid.strip_prefix(' ').unwrap_or("");
+    let n = n
+        .strip_prefix('(')
+        .and_then(|x| x.strip_suffix(')'))
+        .unwrap_or(n);
+    !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+}
 
 struct Executor<'a, 'b> {
     ctx: &'a ApplyContext<'b>,
@@ -476,7 +511,11 @@ impl Executor<'_, '_> {
         {
             Ok(i) => i.id,
             Err(e) if e.is_conflict() => {
-                self.get_by_path(path).await?.context("folder vanished")?.id
+                let i = self.get_by_path(path).await?.context("folder vanished")?;
+                if i.folder.is_none() {
+                    bail!("{path} exists in the target and is not a folder");
+                }
+                i.id
             }
             Err(e) => return Err(e.into()),
         };
@@ -516,7 +555,10 @@ impl Executor<'_, '_> {
                     .g()
                     .get_all(&format!("/drives/{drive}/items/{parent_id}/children"))
                     .await?;
-                if let Some(s) = siblings.iter().find(|s| matches(s)) {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                if let Some(s) = siblings.iter().find(|s| {
+                    matches(s) && s.name.as_deref().is_some_and(|n| is_renamed_copy(name, n))
+                }) {
                     return Ok((
                         Outcome::AlreadyPresent,
                         Some(s.id.clone()),
@@ -570,18 +612,36 @@ impl Executor<'_, '_> {
         content: &crate::repo::ContentRef,
         conflict: &str,
     ) -> Result<DriveItem> {
-        let creates = conflict == "rename";
-        if size <= SIMPLE_UPLOAD_MAX {
-            let data = self.ctx.repo.read_content(content).await?;
-            let url = format!(
-                "/drives/{drive}/root:/{}:/content?@microsoft.graph.conflictBehavior={conflict}",
-                drive_path(path)
-            );
+        // Check the stored content end to end before anything reaches the
+        // tenant: a file is never committed and then found to be wrong.
+        let mut sha = crate::crypto::Sha256Stream::default();
+        let mut total = 0u64;
+        for id in &content.chunks {
+            let chunk = self.ctx.repo.get_chunk(id).await?;
+            sha.update(&chunk);
+            total += chunk.len() as u64;
+        }
+        if total != size || content.size != size || sha.finish_hex() != content.sha256 {
+            bail!("backup content does not match its recorded size or hash");
+        }
+        if size == 0 {
+            // Upload sessions need at least one byte. Create the empty file as
+            // a child with an explicit conflict behaviour.
+            let parent = self
+                .parent_of(path)?
+                .flatten()
+                .context("parent folder not resolved")?;
+            let name = path.rsplit('/').next().expect("name");
+            let body =
+                json!({ "name": name, "file": {}, "@microsoft.graph.conflictBehavior": conflict });
             return Ok(self
                 .g()
-                .put_bytes(&url, data.into(), "application/octet-stream", creates)
+                .post_json(&format!("/drives/{drive}/items/{parent}/children"), &body)
                 .await?);
         }
+        // Every non-empty file goes through an upload session. The simple
+        // PUT /content endpoint does not reliably honour conflict behaviour
+        // and can overwrite; the session body does.
         let sess: UploadSession = self
             .g()
             .post_json(
@@ -592,23 +652,20 @@ impl Executor<'_, '_> {
                 &json!({ "item": { "@microsoft.graph.conflictBehavior": conflict } }),
             )
             .await?;
-        // Repository chunks are 16 x 320 KiB, a valid fragment size, so each
-        // chunk is one fragment and memory stays bounded.
+        // Repository chunks are 16 x 320 KiB, a valid fragment size.
         let mut offset = 0u64;
-        let mut sha = crate::crypto::Sha256Stream::default();
         let mut done = None;
         for id in &content.chunks {
             let chunk = self.ctx.repo.get_chunk(id).await?;
-            sha.update(&chunk);
             let len = chunk.len() as u64;
+            if len == 0 {
+                continue;
+            }
             done = self
                 .g()
                 .upload_fragment(&sess.upload_url, chunk.into(), offset, size)
                 .await?;
             offset += len;
-        }
-        if offset != size || sha.finish_hex() != content.sha256 {
-            bail!("backup content does not match its recorded size or hash");
         }
         let v = done.context("upload session did not complete")?;
         Ok(serde_json::from_value(v)?)
