@@ -328,3 +328,72 @@ async fn restore_plan_dry_run_and_apply() {
 fn banksia_core_hash(b: &[u8]) -> String {
     banksia_core::restore::plan_hash(b)
 }
+
+const RESTORE_TEST_CFG: &str = r#"
+[restore]
+allowed_targets = ["restore-test@contoso.onmicrosoft.com"]
+
+[restore_test]
+mail_target = "restore-test@contoso.onmicrosoft.com"
+drive_target = "restore-test@contoso.onmicrosoft.com"
+sample_size = 3
+evidence_dir = "evidence"
+
+[restore_test.auth]
+client_id = "restore-test-app"
+client_secret = { env = "BANKSIA_TEST_RESTORE_SECRET" }
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restore_test_writes_and_verifies_evidence() {
+    let s = Setup::new(RESTORE_TEST_CFG).await;
+    let u = s.tenant.add_user("adele@contoso.onmicrosoft.com", "Adele");
+    s.tenant
+        .add_user("restore-test@contoso.onmicrosoft.com", "Restore Test");
+    for i in 0..4 {
+        s.tenant.add_message(
+            &u,
+            "Inbox",
+            format!("Subject: s{i}\r\nMessage-ID: <s{i}@x>\r\n\r\nbody").as_bytes(),
+        );
+        s.tenant
+            .add_file(&u, &format!("f{i}.txt"), format!("file {i}").as_bytes());
+    }
+    init(&s);
+    assert_eq!(s.run(&["backup", "run"]).0, 0);
+    // restore.enabled is false: production restores are off, restore tests still run
+    // under their own policy limited to the throwaway targets.
+    let (c, out, err) = s.run(&["restore-test", "run"]);
+    assert_eq!(c, 0, "{out}{err}");
+    assert!(out.contains(": PASS (2 checks: 2 passed"), "{out}");
+    no_secrets(&out);
+    no_secrets(&err);
+    let dir = out
+        .lines()
+        .find_map(|l| l.strip_prefix("evidence written to "))
+        .unwrap()
+        .trim()
+        .to_string();
+    let (c, out, err) = s.run(&["evidence", "verify", &dir]);
+    assert_eq!(c, 0, "{err}");
+    assert!(
+        out.contains("is intact: result PASS, 6 items verified of 6"),
+        "{out}"
+    );
+
+    // Tamper with the report: verify fails.
+    let report = std::path::Path::new(&dir).join("report.md");
+    let text = std::fs::read_to_string(&report)
+        .unwrap()
+        .replace("PASS", "FAIL");
+    std::fs::write(&report, text).unwrap();
+    let (c, _, err) = s.run(&["evidence", "verify", &dir]);
+    assert_eq!(c, 1);
+    assert!(err.contains("report.md does not match"), "{err}");
+
+    // A corrupted restore makes the run fail with exit code 3.
+    s.tenant.corrupt_next_upload();
+    let (c, out, _) = s.run(&["restore-test", "run", "--seed", "abcd"]);
+    assert_eq!(c, 3, "{out}");
+    assert!(out.contains("FAIL"), "{out}");
+}

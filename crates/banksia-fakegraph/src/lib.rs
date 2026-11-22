@@ -921,6 +921,10 @@ fn route(
             }
             _ => err(404, "itemNotFound", "The resource could not be found."),
         },
+        (Method::GET, ["drives", _d, "items", i]) => match s.items.get(*i) {
+            Some(item) if !item.deleted => ok(item_json(s, item)),
+            _ => err(404, "itemNotFound", "The resource could not be found."),
+        },
         (Method::GET, ["drives", d, "items", parent, "children"]) => {
             let list: Vec<Value> = s
                 .items
