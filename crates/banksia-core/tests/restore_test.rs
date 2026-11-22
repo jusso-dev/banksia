@@ -74,6 +74,7 @@ fn ctx<'a>(t: &'a T, seed: Option<&str>) -> RestoreTestContext<'a> {
         repository_label: "memory".into(),
         seed: seed.map(str::to_string),
         users: vec![],
+        expected: vec![],
     }
 }
 
@@ -241,4 +242,54 @@ async fn unconfigured_target_is_skipped() {
         .unwrap();
     assert_eq!(drive.result, Verdict::Skipped);
     assert_eq!(pack.result, Verdict::Pass, "mail still verified");
+}
+
+#[tokio::test]
+async fn configured_user_without_backup_fails_and_unknown_user_is_an_error() {
+    let t = setup(26).await;
+    let mut c = ctx(&t, None);
+    let expected = vec![
+        banksia_core::config::UserSelection {
+            id: "adele@contoso.onmicrosoft.com".into(),
+            workloads: vec![Workload::Mail, Workload::Drive],
+        },
+        banksia_core::config::UserSelection {
+            id: "never-backed-up@contoso.onmicrosoft.com".into(),
+            workloads: vec![Workload::Mail],
+        },
+    ];
+    c.expected = expected.clone();
+    let pack = run(&c).await.unwrap();
+    assert_eq!(pack.result, Verdict::Fail);
+    assert!(
+        pack.checks
+            .iter()
+            .any(|ch| ch.reasons.iter().any(|r| r.contains("no snapshot exists")))
+    );
+
+    let mut c = ctx(&t, None);
+    c.expected = expected;
+    c.users = vec!["nobody@contoso.onmicrosoft.com".into()];
+    assert!(run(&c).await.is_err());
+}
+
+#[tokio::test]
+async fn partial_snapshot_fails_the_check() {
+    let t = setup(26).await;
+    let u = t
+        .env
+        .tenant
+        .add_user("partial@contoso.onmicrosoft.com", "P");
+    let id = t.env.tenant.add_file(&u, "a.txt", b"genuine");
+    t.env.tenant.add_file(&u, "b.txt", b"fine");
+    t.env.tenant.corrupt_download(&id);
+    let s = backup::backup_one(&t.env.backup_ctx(), &u.upn, Workload::Drive)
+        .await
+        .unwrap();
+    assert!(s.partial);
+    let mut c = ctx(&t, None);
+    c.users = vec![u.upn.clone()];
+    let pack = run(&c).await.unwrap();
+    assert_eq!(pack.result, Verdict::Fail);
+    assert!(pack.checks[0].reasons.iter().any(|r| r.contains("partial")));
 }

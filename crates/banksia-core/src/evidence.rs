@@ -241,8 +241,8 @@ For each backed-up user and workload, Banksia loaded the latest snapshot, checke
 selected a deterministic sample using the seed above, and restored the sample into the test target through the \
 same plan and apply engine used for production restores. Every restored item was then read back from Microsoft 365 \
 and compared with the backup: files by size, quickXorHash and SHA-256 of the downloaded content; messages by \
-subject, Internet message id and SHA-256 of each attachment. Message bodies and file contents are not included \
-in this pack.\n\n\
+subject, Internet message id, SHA-256 of each text body and SHA-256 of each attachment. A partial or missing \
+snapshot fails its check. Message bodies, file contents and item names are not included in this pack.\n\n\
 ## Control guidance\n\n\
 This pack is evidence that restoration from backup was tested. It supports the Essential Eight *Regular backups* \
 strategy, which expects restoration of data from backups to be tested, and the corresponding backup and restoration \

@@ -32,6 +32,51 @@ pub struct RestoreTestContext<'a> {
     pub seed: Option<String>,
     /// Limit to these source users (UPN or object id). Empty means all backed-up users.
     pub users: Vec<String>,
+    /// Users and workloads that are expected to have backups (from
+    /// `backup.users`). Each one without a snapshot is a failed check.
+    pub expected: Vec<crate::config::UserSelection>,
+}
+
+/// Category for an error, safe to write into evidence. Full detail goes to
+/// the operator log only, because errors can carry folder and file names.
+fn redact(e: &str) -> String {
+    let l = e.to_ascii_lowercase();
+    let cat = if l.contains("quickxorhash") {
+        "content hash mismatch (quickXorHash)"
+    } else if l.contains("sha-256") || l.contains("sha256") {
+        "content hash mismatch (SHA-256)"
+    } else if l.contains("size") {
+        "size mismatch"
+    } else if l.contains("attachment") {
+        "attachment mismatch"
+    } else if l.contains("body") {
+        "message body mismatch"
+    } else if l.contains("subject") {
+        "subject mismatch"
+    } else if l.contains("internetmessageid") {
+        "Internet message id mismatch"
+    } else if l.contains("not parse") || l.contains("unparseable") {
+        "restored message could not be parsed"
+    } else if l.contains("resolve") {
+        "could not resolve the test target"
+    } else if l.contains("allowlist") {
+        "target not allowed"
+    } else if l.contains("throttl")
+        || l.contains(" 429")
+        || l.contains(" 503")
+        || l.contains("unavailable")
+    {
+        "Graph throttled or unavailable"
+    } else if l.contains("authentication") || l.contains("token") {
+        "authentication failed"
+    } else if l.contains("not resolved") || l.contains("folder") {
+        "could not create a restore folder"
+    } else if l.contains("missing from the repository") || l.contains("failed authentication") {
+        "repository data missing or damaged"
+    } else {
+        "restore or verification error (see operator log)"
+    };
+    cat.to_string()
 }
 
 /// Small deterministic PRNG (SplitMix64) so a recorded seed reproduces the sample.
@@ -104,7 +149,9 @@ pub async fn run(ctx: &RestoreTestContext<'_>) -> Result<EvidencePack> {
         )
         .await?;
 
-    // Which principals and workloads to test.
+    // Which principals and workloads to test: everything configured for
+    // backup, plus anything else with snapshots. A configured pair with no
+    // snapshot fails rather than being silently left out.
     let mut pairs: Vec<(String, Workload)> = ctx
         .repo
         .list_snapshots(None)
@@ -112,16 +159,53 @@ pub async fn run(ctx: &RestoreTestContext<'_>) -> Result<EvidencePack> {
         .into_iter()
         .map(|r| (r.principal_tag, r.workload))
         .collect();
-    pairs.sort();
-    pairs.dedup();
+    let mut missing: Vec<(String, Workload, String)> = Vec::new();
+    for u in &ctx.expected {
+        let tag = ctx.repo.find_principal(&u.id).await?.map(|(t, _)| t);
+        for w in &u.workloads {
+            match &tag {
+                Some(t) if pairs.iter().any(|(pt, pw)| pt == t && pw == w) => {}
+                Some(t) => missing.push((t.clone(), *w, u.id.clone())),
+                None => missing.push((ctx.repo.principal_tag(&u.id), *w, u.id.clone())),
+            }
+        }
+    }
     if !ctx.users.is_empty() {
         let mut keep = Vec::new();
         for u in &ctx.users {
-            if let Some((tag, _)) = ctx.repo.find_principal(u).await? {
-                keep.push(tag);
+            match ctx.repo.find_principal(u).await? {
+                Some((tag, _)) => keep.push(tag),
+                None if ctx.expected.iter().any(|e| e.id.eq_ignore_ascii_case(u)) => {
+                    keep.push(ctx.repo.principal_tag(u))
+                }
+                None => anyhow::bail!("--user {u} has no backups and is not in backup.users"),
             }
         }
         pairs.retain(|(t, _)| keep.contains(t));
+        missing.retain(|(t, _, id)| keep.contains(t) || keep.contains(&ctx.repo.principal_tag(id)));
+    }
+    pairs.sort();
+    pairs.dedup();
+    missing.sort();
+    missing.dedup();
+    for (tag, workload, _) in &missing {
+        pack.checks.push(Check {
+            source_principal_tag: tag.clone(),
+            workload: *workload,
+            snapshot_id: None,
+            snapshot_completed: None,
+            snapshot_age_hours: None,
+            snapshot_partial: None,
+            snapshot_items: None,
+            target: "-".into(),
+            plan_id: None,
+            plan_hash: None,
+            restore_ms: None,
+            verify_ms: None,
+            result: Verdict::Fail,
+            reasons: vec!["configured for backup but no snapshot exists".into()],
+            items: vec![],
+        });
     }
 
     for (tag, workload) in pairs {
@@ -156,23 +240,26 @@ pub async fn run(ctx: &RestoreTestContext<'_>) -> Result<EvidencePack> {
             },
             Some(t) => match test_one(ctx, &seed, &tag, workload, &t, &run_id).await {
                 Ok(c) => c,
-                Err(e) => Check {
-                    source_principal_tag: tag.clone(),
-                    workload,
-                    snapshot_id: None,
-                    snapshot_completed: None,
-                    snapshot_age_hours: None,
-                    snapshot_partial: None,
-                    snapshot_items: None,
-                    target: t,
-                    plan_id: None,
-                    plan_hash: None,
-                    restore_ms: None,
-                    verify_ms: None,
-                    result: Verdict::Fail,
-                    reasons: vec![format!("{e:#}")],
-                    items: vec![],
-                },
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), %workload, "restore test check failed");
+                    Check {
+                        source_principal_tag: tag.clone(),
+                        workload,
+                        snapshot_id: None,
+                        snapshot_completed: None,
+                        snapshot_age_hours: None,
+                        snapshot_partial: None,
+                        snapshot_items: None,
+                        target: t,
+                        plan_id: None,
+                        plan_hash: None,
+                        restore_ms: None,
+                        verify_ms: None,
+                        result: Verdict::Fail,
+                        reasons: vec![redact(&format!("{e:#}"))],
+                        items: vec![],
+                    }
+                }
             },
         };
         pack.checks.push(check);
@@ -242,6 +329,9 @@ async fn test_one(
         }
     }
     if snap.partial {
+        // Items that failed to back up cannot be restored; a partial snapshot
+        // is not evidence that the backup works.
+        check.result = Verdict::Fail;
         check.reasons.push(format!(
             "latest snapshot is partial ({} item errors)",
             snap.errors.len()
@@ -307,10 +397,13 @@ async fn test_one(
             _ => {
                 if r.outcome == Outcome::Failed {
                     check.result = Verdict::Fail;
-                    check.reasons.push(format!(
-                        "could not create a folder: {}",
-                        r.detail.clone().unwrap_or_default()
-                    ));
+                    tracing::warn!(
+                        detail = r.detail.as_deref().unwrap_or(""),
+                        "restore test folder action failed"
+                    );
+                    check
+                        .reasons
+                        .push("could not create a restore folder".into());
                 }
                 continue;
             }
@@ -386,7 +479,9 @@ async fn test_one(
             Ok(passed) => ev.checks_passed = passed,
             Err(e) => {
                 ev.result = Verdict::Fail;
-                ev.failure = Some(format!("{e:#}"));
+                let full = format!("{e:#}");
+                tracing::warn!(item = %ev.item_ref, error = %full, "restore test item failed");
+                ev.failure = Some(redact(&full));
                 check.result = Verdict::Fail;
             }
         }
@@ -524,28 +619,65 @@ async fn verify_message(
         .bytes()
         .await?;
     let original = ctx.repo.read_content(content).await?;
-    let a = attachment_hashes(&original);
-    let b = attachment_hashes(&restored);
+    let a = content_hashes(&original).context("backed-up message could not be parsed as MIME")?;
+    let b = content_hashes(&restored)?;
     anyhow::ensure!(
-        a == b,
-        "attachments differ ({} in backup, {} restored)",
-        a.len(),
-        b.len()
+        a.bodies == b.bodies,
+        "message body differs from backup ({} body parts in backup, {} restored)",
+        a.bodies.len(),
+        b.bodies.len()
     );
-    passed.push(format!("attachments_sha256 ({})", a.len()));
+    passed.push(format!("body_sha256 ({})", a.bodies.len()));
+    anyhow::ensure!(
+        a.attachments == b.attachments,
+        "attachments differ ({} in backup, {} restored)",
+        a.attachments.len(),
+        b.attachments.len()
+    );
+    passed.push(format!("attachments_sha256 ({})", a.attachments.len()));
     Ok(passed)
 }
 
-fn attachment_hashes(mime: &[u8]) -> Vec<String> {
-    let Some(m) = mail_parser::MessageParser::default().parse(mime) else {
-        return vec![];
+/// Hashes of a message's content parts: each text body, each HTML body and
+/// each attachment. Bodies are compared after normalising line endings and
+/// trailing whitespace, which Exchange may change on import.
+struct ContentHashes {
+    bodies: Vec<String>,
+    attachments: Vec<String>,
+}
+
+fn content_hashes(mime: &[u8]) -> Result<ContentHashes> {
+    let m = mail_parser::MessageParser::default()
+        .parse(mime)
+        .context("restored message could not be parsed as MIME")?;
+    let norm = |t: &str| {
+        let t = t.replace("\r\n", "\n");
+        let lines: Vec<&str> = t.lines().map(str::trim_end).collect();
+        crate::crypto::sha256_hex(lines.join("\n").trim_end().as_bytes())
     };
-    let mut v: Vec<String> = m
+    let mut bodies: Vec<String> = Vec::new();
+    for i in 0.. {
+        match m.body_text(i) {
+            Some(t) => bodies.push(format!("text:{}", norm(&t))),
+            None => break,
+        }
+    }
+    let mut attachments: Vec<String> = m
         .attachments()
         .map(|p| crate::crypto::sha256_hex(&p.decoded()))
         .collect();
-    v.sort();
-    v
+    attachments.sort();
+    Ok(ContentHashes {
+        bodies,
+        attachments,
+    })
+}
+
+#[cfg(test)]
+fn attachment_hashes(mime: &[u8]) -> Vec<String> {
+    content_hashes(mime)
+        .map(|c| c.attachments)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -569,5 +701,21 @@ mod tests {
         m2.extend_from_slice(m1);
         assert_eq!(attachment_hashes(m1).len(), 1);
         assert_eq!(attachment_hashes(m1), attachment_hashes(&m2));
+        let a = content_hashes(m1).unwrap();
+        let b = content_hashes(&m2).unwrap();
+        assert_eq!(a.bodies, b.bodies);
+        let changed = String::from_utf8_lossy(m1).replace("\r\nhi\r\n", "\r\nbye\r\n");
+        assert_ne!(content_hashes(changed.as_bytes()).unwrap().bodies, a.bodies);
+    }
+
+    #[test]
+    fn redaction_drops_names() {
+        let r =
+            redact("parent folder of Banksia Restore/x/Inbox/HR Layoffs/Alice was not resolved");
+        assert!(!r.contains("HR") && !r.contains("Alice"), "{r}");
+        assert_eq!(
+            redact("uploaded quickXorHash does not match the backup"),
+            "content hash mismatch (quickXorHash)"
+        );
     }
 }

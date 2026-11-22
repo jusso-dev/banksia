@@ -1,6 +1,8 @@
 # Banksia schedule for cron. Install with `crontab -u banksia deploy/cron.example`.
 # Backups every six hours, restore test every Monday at 03:30 local time.
+# flock -n skips a run if the previous one is still going (a first full backup
+# can take days). Banksia also locks each user and workload itself.
 BANKSIA_CONFIG=/etc/banksia/banksia.toml
 BANKSIA_OPERATOR=cron
-0 */6 * * *  cd /var/lib/banksia && /usr/local/bin/banksia backup run >> /var/log/banksia/backup.log 2>&1
-30 3 * * 1   cd /var/lib/banksia && /usr/local/bin/banksia restore-test run >> /var/log/banksia/restore-test.log 2>&1
+0 */6 * * *  cd /var/lib/banksia && flock -n /var/lib/banksia/backup.cron.lock /usr/local/bin/banksia backup run >> /var/log/banksia/backup.log 2>&1
+30 3 * * 1   cd /var/lib/banksia && flock -n /var/lib/banksia/restore-test.cron.lock /usr/local/bin/banksia restore-test run >> /var/log/banksia/restore-test.log 2>&1

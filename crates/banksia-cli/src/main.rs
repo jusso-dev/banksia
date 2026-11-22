@@ -423,6 +423,7 @@ async fn run(cli: Cli) -> Result<std::process::ExitCode> {
                 repository_label: repo.store().label().to_string(),
                 seed,
                 users: user,
+                expected: cfg.backup.users.clone(),
             };
             let pack = banksia_core::restore_test::run(&ctx).await?;
             let dir = evidence_dir.unwrap_or_else(|| policy.evidence_dir.clone());
