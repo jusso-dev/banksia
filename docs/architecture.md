@@ -138,8 +138,8 @@ Graph throttling sets the pace, not bandwidth. The first full backup of a large 
 
 Restores write into the tenant, which is the riskiest operation Banksia performs. The model is plan, approve, apply.
 
-1. **Plan** (`banksia restore plan`). Reads the repository only. Selects a snapshot and items (a message, a folder, a file or a drive folder), a target user and a target location. Writes a plan file and prints a summary and the plan's SHA-256 hash. No tenant writes. Planning is the dry run.
-2. **Approve.** A person reviews the plan and supplies its hash (or a prefix of at least 12 hex characters) to apply. The plan hash binds the approval to exact content: any edit changes the hash.
+1. **Plan** (`banksia restore plan`). Reads the repository, resolves the target user with the read-only backup app, and writes a `restore.plan_created` audit event. Selects a snapshot and items (a message, a folder, a file or a drive folder), a target user and a target location. Writes a plan file and prints a summary and the plan's SHA-256 hash. No tenant writes. Planning is the dry run.
+2. **Approve.** A person reviews the plan and supplies the full 64-character hash to apply. The plan hash binds the approval to exact content: any edit changes the hash.
 3. **Apply** (`banksia restore apply --plan p.json --approve <hash>`). Checks that restore is enabled, the target is on the allowlist, the target object id still matches the plan, and the repository matches. Writes an audit event, then executes actions in order, recording each completed action in a local journal. `--dry-run` performs every check and read-only lookup, then reports what would happen.
 
 Rules:

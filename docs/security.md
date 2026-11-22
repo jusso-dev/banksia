@@ -26,10 +26,10 @@ Each app needs application permissions and a tenant admin to grant consent. Use 
 
 | Operation | Permission (application) | Why | How to narrow |
 | --- | --- | --- | --- |
-| Resolve users by UPN | `User.ReadBasic.All` | Map UPN to object id and drive. | Configure object ids instead and drop this permission. |
+| Resolve users | `User.ReadBasic.All` | Map a UPN or object id to the user and check it still exists. Needed by backup, restore plan, restore apply and restore tests. | None in the MVP: Graph needs this permission to read `/users/{id}` even when `{id}` is an object id. |
 | Mailbox backup | `Mail.Read` | Folders, message delta, MIME. | Exchange RBAC for Applications: assign `Application Mail.Read` with a management scope covering only backed-up mailboxes. |
 | OneDrive backup | `Files.Read.All` | Drive delta and content. | `Sites.Selected` granted per OneDrive site, where your tenant's process allows it. |
-| Mail restore | `Mail.ReadWrite` | Create folders, import MIME, set the restore marker. | Exchange RBAC for Applications: `Application Mail.ReadWrite` scoped to the mailboxes you allow restores into. |
+| Mail restore | `Mail.ReadWrite` | Create folders and import MIME. | Exchange RBAC for Applications: `Application Mail.ReadWrite` scoped to the mailboxes you allow restores into. |
 | OneDrive restore | `Files.ReadWrite.All` | Create folders, upload files. | `Sites.Selected` with write on approved OneDrive sites. |
 | Restore test | `Mail.ReadWrite`, `Files.ReadWrite.All` | Restore to and read back from safe targets. | Scope both to the throwaway mailbox and OneDrive only. |
 
@@ -46,7 +46,7 @@ If you scope with RBAC for Applications, do not also grant the unscoped Entra `M
 
 ### Storage permissions
 
-| Backend | Backup and restore-test | Restore and plan | Never needed |
+| Backend | Backup and restore-test | Restore and plan (plan also writes an audit event) | Never needed |
 | --- | --- | --- | --- |
 | Azure Blob | Read, list, create (for example `Storage Blob Data Contributor` on the container). | Read and list (`Storage Blob Data Reader`), plus create for audit events. | Delete, account keys. |
 | Cloudflare R2 | API token with object read and write on the bucket only. | Same token or a read-only token plus audit writes. | Account-wide tokens, admin tokens. |
@@ -92,7 +92,7 @@ Writes into the tenant follow these rules:
 
 1. **Disabled by default.** `restore.enabled` must be `true` in configuration.
 2. **Allowlist.** The target user must be listed in `restore.allowed_targets`. Restore tests may only write to `restore_test.mail_target` and `restore_test.drive_target`.
-3. **Plan, then approve.** `restore plan` writes a plan and prints its SHA-256 hash. `restore apply` requires `--approve` with the hash (or at least its first 12 hex characters). Any change to the plan changes the hash. This makes approval an explicit act and lets a second person approve a plan prepared by someone else.
+3. **Plan, then approve.** `restore plan` writes a plan and prints its SHA-256 hash. `restore apply` requires `--approve` with the full 64-character hash. Prefixes are not accepted, because a short prefix can be matched by a different plan with enough computing effort. Any change to the plan changes the hash. This makes approval an explicit act and lets a second person approve a plan prepared by someone else.
 4. **Revalidation.** Apply re-resolves the target user and refuses if its object id differs from the plan.
 5. **Additive only.** Restore never overwrites or deletes tenant data.
 6. **Journal and audit.** Every action is journalled locally, and audit events (plan created, apply started, apply finished with counts and failures, operator and host) are written append-only to the repository.
