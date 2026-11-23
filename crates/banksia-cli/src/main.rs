@@ -59,11 +59,43 @@ enum Command {
         #[command(subcommand)]
         command: RestoreCommand,
     },
+    /// Restore a sample into a throwaway target, verify it, write evidence.
+    RestoreTest {
+        #[command(subcommand)]
+        command: RestoreTestCommand,
+    },
+    /// Check restore-test evidence packs.
+    Evidence {
+        #[command(subcommand)]
+        command: EvidenceCommand,
+    },
     /// Show audit events from the repository.
     Audit {
         #[command(subcommand)]
         command: AuditCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum RestoreTestCommand {
+    /// Run a restore test now. Exit code 0 on pass, 3 on fail.
+    Run {
+        /// Limit to these source users. Repeatable.
+        #[arg(long)]
+        user: Vec<String>,
+        /// Hex seed, to repeat an earlier sample.
+        #[arg(long)]
+        seed: Option<String>,
+        /// Override restore_test.evidence_dir.
+        #[arg(long)]
+        evidence_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvidenceCommand {
+    /// Verify an evidence pack directory against its manifest and signature.
+    Verify { dir: PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -357,6 +389,92 @@ async fn run(cli: Cli) -> Result<std::process::ExitCode> {
             }
         }
         Command::Restore { command } => return restore_cmd(&cli.config, command).await,
+        Command::RestoreTest {
+            command:
+                RestoreTestCommand::Run {
+                    user,
+                    seed,
+                    evidence_dir,
+                },
+        } => {
+            let cfg = Config::load(&cli.config)?;
+            let policy = cfg
+                .restore_test
+                .as_ref()
+                .context("restore_test is not configured")?;
+            let repo = open_repo(&cfg).await?;
+            let auth = policy
+                .auth
+                .as_ref()
+                .or(cfg.restore.auth.as_ref())
+                .context("configure restore_test.auth or restore.auth")?;
+            let test_graph = banksia_core::graph::client(&cfg, auth, "restore_test.auth")?;
+            if let Some(sd) = &seed
+                && (sd.is_empty() || !sd.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
+                bail!("--seed must be hex");
+            }
+            let ctx = banksia_core::restore_test::RestoreTestContext {
+                repo: &repo,
+                test_graph: &test_graph,
+                policy,
+                state_dir: cfg.state.dir.clone(),
+                operator: banksia_core::audit::operator(),
+                repository_label: repo.store().label().to_string(),
+                seed,
+                users: user,
+                expected: cfg.backup.users.clone(),
+            };
+            let pack = banksia_core::restore_test::run(&ctx).await?;
+            let dir = evidence_dir.unwrap_or_else(|| policy.evidence_dir.clone());
+            let dir = if dir.is_relative() {
+                std::env::current_dir()?.join(dir)
+            } else {
+                dir
+            };
+            let out = banksia_core::evidence::write(&pack, &repo, &dir).await?;
+            let s = &pack.summary;
+            println!(
+                "restore test {}: {} ({} checks: {} passed, {} failed, {} skipped; {} items verified of {})",
+                pack.run_id,
+                pack.result.word(),
+                s.checks,
+                s.checks_passed,
+                s.checks_failed,
+                s.checks_skipped,
+                s.items_verified,
+                s.items_tested
+            );
+            for c in &pack.checks {
+                if !c.reasons.is_empty() {
+                    println!(
+                        "  {} {}: {}",
+                        c.workload,
+                        &c.source_principal_tag[..12],
+                        c.reasons.join("; ")
+                    );
+                }
+            }
+            println!("evidence written to {}", out.display());
+            if pack.result != banksia_core::evidence::Verdict::Pass {
+                return Ok(std::process::ExitCode::from(3));
+            }
+        }
+        Command::Evidence {
+            command: EvidenceCommand::Verify { dir },
+        } => {
+            let cfg = Config::load(&cli.config)?;
+            let key = load_master_key(&cfg)?;
+            let pack = banksia_core::evidence::verify(&dir, &key.derive())?;
+            println!(
+                "evidence {} is intact: result {}, {} items verified of {}, completed {}",
+                pack.run_id,
+                pack.result.word(),
+                pack.summary.items_verified,
+                pack.summary.items_tested,
+                pack.completed
+            );
+        }
         Command::Audit {
             command: AuditCommand::List { json },
         } => {
