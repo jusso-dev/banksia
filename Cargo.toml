@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/jusso-dev/banksia"
-rust-version = "1.89"
+rust-version = "1.98"
 publish = false
 
 [workspace.dependencies]
@@ -16,6 +16,11 @@ url = "2"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form", "query", "http2", "stream"] }
+percent-encoding = "2"
+aws-lc-rs = "1"
+axum = "0.8"
+mail-parser = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "fs", "net"] }
 object_store = { version = "0.14", features = ["azure", "aws"] }
 bytes = "1"
@@ -36,6 +41,9 @@ clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 
 banksia-core = { path = "crates/banksia-core" }
+banksia-graph = { path = "crates/banksia-graph" }
+banksia-fakegraph = { path = "crates/banksia-fakegraph" }
+banksia-quickxor = { path = "crates/banksia-quickxor" }
 
 [profile.release]
 lto = "thin"
