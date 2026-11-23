@@ -1,0 +1,12 @@
+[package]
+name = "banksia-quickxor"
+description = "Microsoft quickXorHash, as used by OneDrive and SharePoint."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true

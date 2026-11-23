@@ -1,0 +1,20 @@
+[Unit]
+Description=Banksia backup run
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=banksia
+Group=banksia
+WorkingDirectory=/var/lib/banksia
+Environment=BANKSIA_CONFIG=/etc/banksia/banksia.toml
+Environment=BANKSIA_OPERATOR=systemd-timer
+# Secrets referenced by banksia.toml as { env = "..." } can be supplied with
+# LoadCredential= and a small wrapper, or with EnvironmentFile= mode 600.
+ExecStart=/usr/local/bin/banksia backup run
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/banksia
