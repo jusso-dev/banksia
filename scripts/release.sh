@@ -56,12 +56,13 @@ cargo test --workspace --locked
 for target in "${targets[@]}"; do
   echo "==> $target"
   rustup target add "$target" >/dev/null
-  envs=()
+  # Start non-empty: macOS bash 3.2 treats an empty array as unset under -u.
+  envs=("BANKSIA_RELEASE_TARGET=$target")
   if [[ "$target" == *-linux-musl ]]; then
     zt="${target%%-*}-linux-musl"
     t="${target//-/_}"
     tu="$(echo "$t" | tr '[:lower:]' '[:upper:]')"
-    envs=(
+    envs+=(
       "CC_$t=$shim/cc-$zt"
       "CXX_$t=$shim/c++-$zt"
       "AR_$t=$shim/ar"
