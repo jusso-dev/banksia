@@ -1,10 +1,10 @@
 # Banksia architecture
 
-Status: MVP design, November 2026. Tracks issue #1.
+Status: v1.0, November 2026. Tracks issue #1.
 
 Banksia backs up Microsoft 365 and Entra ID data into storage the customer owns, restores it back into the tenant, and proves on a schedule that restores work. Banksia covers Microsoft 365 and Entra ID. It does not back up cloud infrastructure, virtual machines, disks or agent workspaces.
 
-The MVP covers Exchange Online mailboxes and OneDrive. SharePoint, Teams and Entra ID objects have reserved places in the design (see [Extension points](#extension-points)) but no code yet.
+Version 1.0 covers Exchange Online mailboxes and OneDrive. SharePoint, Teams and Entra ID objects have reserved places in the design (see [Extension points](#extension-points)) but no code yet.
 
 ## Goals
 
@@ -41,9 +41,9 @@ Layout:
 | `crates/banksia-cli` | The `banksia` binary. |
 | `crates/banksia-fakegraph` | An in-process fake tenant (HTTP server) used by tests. Never shipped. |
 
-### Decision: no dependency on Junction for the MVP
+### Decision: no dependency on Junction
 
-jusso-dev/junction already speaks Microsoft Graph in Rust. Banksia does not depend on it for the MVP:
+jusso-dev/junction already speaks Microsoft Graph in Rust. Banksia does not depend on it:
 
 - Junction's auth crate is built for interactive and developer flows and pulls in OS keychain integration that an unattended backup service does not need.
 - Junction pins `reqwest` 0.12 while `object_store` uses 0.13. Depending on both would ship two HTTP and TLS stacks.
@@ -69,7 +69,7 @@ Revisit if Junction publishes a small, stable, app-only auth crate on `reqwest` 
                      +--------------------------------------------------------------------+
 ```
 
-Each command is a short-lived process. Scheduling is done by systemd timers, cron, Kubernetes CronJobs or a container scheduler (examples in `deploy/`). There is no long-running daemon or web console in the MVP.
+Each command is a short-lived process. Scheduling is done by systemd timers, cron, Kubernetes CronJobs or a container scheduler (examples in `deploy/`). There is no long-running daemon or web console in version 1.0.
 
 ## Repository format
 

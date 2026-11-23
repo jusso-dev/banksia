@@ -1,6 +1,6 @@
 # Banksia security
 
-Status: MVP design, November 2026. Tracks issues #1, #4 and #7. See also [threat-model.md](threat-model.md).
+Status: v1.0, November 2026. Tracks issues #1, #4 and #7. See also [threat-model.md](threat-model.md).
 
 ## Summary
 
@@ -26,7 +26,7 @@ Each app needs application permissions and a tenant admin to grant consent. Use 
 
 | Operation | Permission (application) | Why | How to narrow |
 | --- | --- | --- | --- |
-| Resolve users | `User.ReadBasic.All` | Map a UPN or object id to the user and check it still exists. Needed by backup, restore plan, restore apply and restore tests. | None in the MVP: Graph needs this permission to read `/users/{id}` even when `{id}` is an object id. |
+| Resolve users | `User.ReadBasic.All` | Map a UPN or object id to the user and check it still exists. Needed by backup, restore plan, restore apply and restore tests. | None in version 1.0: Graph needs this permission to read `/users/{id}` even when `{id}` is an object id. |
 | Mailbox backup | `Mail.Read` | Folders, message delta, MIME. | Exchange RBAC for Applications: assign `Application Mail.Read` with a management scope covering only backed-up mailboxes. |
 | OneDrive backup | `Files.Read.All` | Drive delta and content. | `Sites.Selected` granted per OneDrive site, where your tenant's process allows it. |
 | Mail restore | `Mail.ReadWrite` | Create folders and import MIME. | Exchange RBAC for Applications: `Application Mail.ReadWrite` scoped to the mailboxes you allow restores into. |
@@ -73,7 +73,7 @@ Prefer managed identity or workload identity for Azure Blob where Banksia runs i
 ### Key loss and rotation
 
 - **Loss.** Losing the master key makes the repository unreadable. This is the cost of customer-held keys. Keep an offline copy (for example a sealed printout or a hardware-backed secret store) under your normal key-custody process.
-- **Rotation.** The MVP does not rotate keys in place. Rotate by creating a new repository with a new key and keeping the old one, read-only, until its retention ends.
+- **Rotation.** Version 1.0 does not rotate keys in place. Rotate by creating a new repository with a new key and keeping the old one, read-only, until its retention ends.
 - **Gap.** Key wrapping with Azure Key Vault or another KMS is planned, not built.
 
 ## Immutability and retention
@@ -84,7 +84,7 @@ Banksia's repository layout is write once by design: content blobs are named by 
 - **Cloudflare R2.** Use bucket lock rules with a retention period on the repository prefix. Choose the Oceania (`oc`) location hint or an Australian jurisdiction where offered.
 - **Local.** Use a filesystem or appliance with snapshots or WORM support.
 
-Retention is applied by storage, not by Banksia, in the MVP. Pruning old snapshots needs a careful design (deleting unreferenced blobs is unsafe while backups run) and is not built. A retention period should be set so that storage cost and recovery needs balance. Banksia reports snapshot ages in restore-test evidence.
+Retention is applied by storage, not by Banksia, in version 1.0. Pruning old snapshots needs a careful design (deleting unreferenced blobs is unsafe while backups run) and is not built. A retention period should be set so that storage cost and recovery needs balance. Banksia reports snapshot ages in restore-test evidence.
 
 ## Restore authorisation
 

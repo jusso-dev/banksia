@@ -8,9 +8,9 @@ Banksia covers Microsoft 365 and Entra ID. It does not back up cloud infrastruct
 
 ## Status
 
-MVP. Not yet proven against a production tenant. Do not rely on it as your only backup yet.
+Version 1.0. The command line, configuration file, repository format (version 1) and exit codes are stable and follow [semantic versioning](docs/releasing.md#versioning). Banksia 1.0 is tested against a fake tenant only. Run the [opt-in live test](docs/testing.md#opt-in-live-test) against your own tenant, and keep another backup, until you have proven restores in your environment. See [CHANGELOG.md](CHANGELOG.md) and the [1.0 release notes](docs/releases/v1.0.0.md).
 
-| Area | MVP |
+| Area | 1.0 |
 | --- | --- |
 | Exchange Online mailboxes | Incremental backup; restore a message or folder, in place or to a new folder |
 | OneDrive | Incremental, hash-verified backup; restore a file or folder, in place or to a new folder |
@@ -29,18 +29,30 @@ banksia restore-test run    sample  ->  throwaway target  ->  read back  ->  evi
 
 ## Quick start
 
-Build:
+Install a release binary from [GitHub Releases](https://github.com/jusso-dev/banksia/releases). Builds are provided for Linux x86_64 and aarch64 (static, musl) and macOS on Apple silicon:
 
 ```sh
-cargo build --release
+V=v1.0.0 T=x86_64-unknown-linux-musl
+curl -LO https://github.com/jusso-dev/banksia/releases/download/$V/banksia-$V-$T.tar.gz
+curl -LO https://github.com/jusso-dev/banksia/releases/download/$V/SHA256SUMS
+shasum -a 256 --check --ignore-missing SHA256SUMS
+tar -xzf banksia-$V-$T.tar.gz
+install banksia-$V-$T/banksia /usr/local/bin/
+banksia --version
+```
+
+Or build from source (Rust 1.98 or later):
+
+```sh
+cargo build --release --locked
 install target/release/banksia /usr/local/bin/
 ```
 
 Prepare the tenant (see [docs/security.md](docs/security.md) for the full permission matrix):
 
 1. Register `banksia-backup` with application permissions `Mail.Read`, `Files.Read.All` and `User.ReadBasic.All`. Upload a certificate. Grant admin consent. Scope mail access with Exchange RBAC for Applications.
-2. Register `banksia-restore` with `Mail.ReadWrite` and `Files.ReadWrite.All`, scoped to the users you will restore into.
-3. Create a throwaway user for restore tests, and optionally a third app registration scoped only to it.
+2. Register `banksia-restore` with `Mail.ReadWrite`, `Files.ReadWrite.All` and `User.ReadBasic.All`, scoped to the users you will restore into.
+3. Create a throwaway user for restore tests, and optionally a third app registration (`restore_test.auth`) with the same permissions, scoped only to it.
 
 Configure:
 
@@ -94,6 +106,9 @@ Example schedules are in [deploy/](deploy/).
 - [Security](docs/security.md): permissions per operation, encryption, immutability, retention and restore authorisation
 - [Threat model](docs/threat-model.md)
 - [Testing](docs/testing.md), including the opt-in live test
+- [Upgrading](docs/upgrading.md)
+- [Releasing](docs/releasing.md)
+- [Changelog](CHANGELOG.md)
 
 ## Licence
 
