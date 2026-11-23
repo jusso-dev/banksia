@@ -35,13 +35,16 @@ Requirements:
 - Separate backup and restore-test app registrations scoped to that user only (see [security.md](security.md)).
 - A throwaway storage container or bucket.
 
-Run it explicitly:
+Run it explicitly with a separate configuration file that points only at the throwaway user and storage:
 
 ```sh
-export BANKSIA_LIVE_TEST=1
-export BANKSIA_LIVE_THROWAWAY_USER=restore-test@example.onmicrosoft.com
-banksia --config banksia.live.toml backup run
-banksia --config banksia.live.toml restore-test run
+banksia --config banksia.live.toml repo init
+banksia --config banksia.live.toml backup run --user restore-test@example.onmicrosoft.com
+banksia --config banksia.live.toml restore-test run --user restore-test@example.onmicrosoft.com
 ```
 
-`restore-test run` only writes to the configured `restore_test` targets, and refuses to run if those targets are not also listed in `restore.allowed_targets`.
+Safeguards:
+
+- `restore-test run` only writes to the configured `restore_test` targets, and configuration is rejected unless those targets are also listed in `restore.allowed_targets`.
+- Test restores always go to a new `Banksia Restore/<plan id>` folder in the target. They never overwrite or delete.
+- `graph.allow_insecure_http_for_tests` is rejected for anything other than a loopback address, so a live configuration cannot downgrade to HTTP.
