@@ -4,6 +4,10 @@ All notable changes to Banksia are recorded here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- README: status badges, macOS install note, evidence pack location, environment variables and vulnerability reporting.
+
 ## [1.0.0] - 2026-11-23
 
 First stable release. Full notes: [docs/releases/v1.0.0.md](docs/releases/v1.0.0.md).
