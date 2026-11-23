@@ -1,5 +1,9 @@
 # Banksia
 
+[![CI](https://github.com/jusso-dev/banksia/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jusso-dev/banksia/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/jusso-dev/banksia)](https://github.com/jusso-dev/banksia/releases/latest)
+[![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
+
 Self-hosted backup for Microsoft 365 and Entra ID, with restore back into the tenant and scheduled restore tests.
 
 Banksia stores mailbox and OneDrive data (and later SharePoint, Teams and Entra ID objects) in storage you own, such as Azure Blob or Cloudflare R2 in Australia. Data is encrypted on your host with a key you hold. The product is the in-tenant restore and the restore-test evidence, not only a copy of the data.
@@ -40,6 +44,8 @@ tar -xzf banksia-$V-$T.tar.gz
 install banksia-$V-$T/banksia /usr/local/bin/
 banksia --version
 ```
+
+On macOS, use `T=aarch64-apple-darwin`. The binary is not notarised, so after the checksum passes, run `xattr -d com.apple.quarantine banksia-$V-$T/banksia`. The Linux binaries are statically linked and need no system libraries.
 
 Or build from source (Rust 1.98 or later):
 
@@ -86,10 +92,23 @@ Run a restore test and check its evidence:
 
 ```sh
 banksia restore-test run
-banksia evidence verify evidence/<run id>
+banksia evidence verify /var/lib/banksia/evidence/<run id>
 ```
 
-Example schedules are in [deploy/](deploy/).
+Evidence packs are written to `restore_test.evidence_dir` (`evidence/` relative to the working directory if unset), or to `--evidence-dir`. The command prints the path it wrote.
+
+Example systemd timers and a cron file are in [deploy/](deploy/). They back up every six hours and run a restore test every Monday at 03:30.
+
+## Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `BANKSIA_CONFIG` | Path to `banksia.toml`, instead of `--config`. Default `banksia.toml`. |
+| `BANKSIA_LOG` | Log filter, for example `info`, `debug` or `banksia_core=debug`. Logs go to stderr. Default `info`. |
+| `BANKSIA_OPERATOR` | Name recorded in audit events. Falls back to `$USER`, then `unknown`. |
+| `BANKSIA_HOST` | Host name recorded in audit events. Falls back to `$HOSTNAME`, then `unknown`; set it for systemd and cron, which usually leave `HOSTNAME` unset. |
+
+Secrets are supplied through environment variables or files named in `banksia.toml`, never inline. See [docs/security.md](docs/security.md#secrets-handling).
 
 ## Exit codes
 
@@ -109,6 +128,10 @@ Example schedules are in [deploy/](deploy/).
 - [Upgrading](docs/upgrading.md)
 - [Releasing](docs/releasing.md)
 - [Changelog](CHANGELOG.md)
+
+## Reporting a vulnerability
+
+Report security issues privately to the repository owner through GitHub. Do not open a public issue with exploit details. See [docs/security.md](docs/security.md#reporting-a-vulnerability).
 
 ## Licence
 
