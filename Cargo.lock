@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "banksia-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "banksia-core",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "banksia-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "banksia-fakegraph",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "banksia-fakegraph"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "banksia-quickxor",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "banksia-graph"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aws-lc-rs",
  "banksia-fakegraph",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "banksia-quickxor"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
 ]

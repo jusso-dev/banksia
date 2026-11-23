@@ -53,7 +53,7 @@ pub(crate) async fn backup(
             continue;
         }
         if it.package.is_some() {
-            // OneNote notebooks and other packages are not backed up in the MVP.
+            // OneNote notebooks and other packages are not backed up in version 1.0.
             continue;
         }
         let is_root = it.root.is_some();

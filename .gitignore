@@ -13,3 +13,5 @@ banksia.*.toml
 .banksia-state/
 evidence/
 banksia-repo/
+# Release build output.
+/dist

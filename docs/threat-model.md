@@ -1,6 +1,6 @@
 # Banksia threat model
 
-Status: MVP design, November 2026. Tracks issue #1. Method: assets, trust boundaries, then threats by STRIDE category with mitigations and open gaps.
+Status: v1.0, November 2026. Tracks issue #1. Method: assets, trust boundaries, then threats by STRIDE category with mitigations and open gaps.
 
 ## Assets
 
