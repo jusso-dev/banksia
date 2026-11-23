@@ -69,7 +69,7 @@ Revisit if Junction publishes a small, stable, app-only auth crate on `reqwest` 
                      +--------------------------------------------------------------------+
 ```
 
-Each command is a short-lived process. Scheduling is done by systemd timers, cron, Kubernetes CronJobs or a container scheduler. There is no long-running daemon or web console in the MVP.
+Each command is a short-lived process. Scheduling is done by systemd timers, cron, Kubernetes CronJobs or a container scheduler (examples in `deploy/`). There is no long-running daemon or web console in the MVP.
 
 ## Repository format
 
@@ -78,6 +78,7 @@ A repository is a prefix in a bucket or container (or a local directory). Format
 ```
 banksia.repo.json                                  plaintext: format, repo id, created, key check
 blobs/<2 hex>/<64 hex>                             encrypted content chunks, content addressed
+principals/<principal tag>                         encrypted object id and UPN
 snapshots/<principal tag>/<workload>/<snapshot id> encrypted snapshot manifest (JSON)
 audit/<yyyy>/<mm>/<event id>                       encrypted audit events
 evidence/<run id>/<file>                           encrypted copy of each evidence pack
@@ -90,6 +91,7 @@ evidence/<run id>/<file>                           encrypted copy of each eviden
 - **Principal tags.** HMAC of the user's Entra object id, truncated to 128 bits. Object names do not reveal who a backup belongs to.
 - **Key check.** `banksia.repo.json` holds an HMAC of a fixed label. A wrong key is rejected before anything is written.
 - **Snapshot ids** are UTC timestamps with a random suffix, so they sort by time.
+- **Principals.** `principals/<tag>` holds the encrypted object id and UPN for each backed-up user, so `--user` lookups work without exposing names in object paths.
 - **Chunking.** Content is split into fixed 5 MiB chunks (16 x 320 KiB, which also suits OneDrive upload sessions). Content-defined chunking is a later improvement.
 - **Write once.** Every write uses a create-only conditional put (`If-None-Match: *` or the local equivalent). An object that already exists is treated as already written, which is always correct because names are derived from content or are unique. Banksia never overwrites or deletes repository objects. Retention is enforced by storage lifecycle and immutability policies (see [security.md](security.md)).
 
@@ -154,10 +156,10 @@ Known gap: messages imported from MIME through Graph v1.0 can appear as drafts i
 
 `banksia restore-test run`:
 
-1. Loads the latest snapshot for each configured user and workload and checks its age against `max_snapshot_age_hours`.
+1. Loads the latest snapshot for each configured user and workload and checks its age against `max_snapshot_age_hours`. A configured user or workload with no snapshot, or whose latest snapshot is partial, fails the check.
 2. Picks a deterministic sample using a recorded seed.
-3. Builds a restore plan to the configured safe target (a throwaway mailbox and OneDrive) and applies it with the normal executor, under a restore-test policy that only permits the safe targets.
-4. Reads every restored item back from the tenant and verifies it: files by size, `quickXorHash` and SHA-256 of the downloaded content; messages by subject, `internetMessageId` and SHA-256 of each attachment.
+3. Builds a restore plan to the configured safe target (a throwaway mailbox and OneDrive) and applies it with the normal executor, under a restore-test policy that only permits the safe targets. This works even when `restore.enabled` is false, because the policy cannot reach any other user.
+4. Reads every restored item back from the tenant and verifies it: files by size, `quickXorHash` and SHA-256 of the downloaded content; messages by subject, `internetMessageId`, SHA-256 of each text body (after normalising line endings) and SHA-256 of each attachment. A restored message that cannot be parsed fails.
 5. Writes an evidence pack: `evidence.json`, `report.md`, `manifest.json` (SHA-256 of each file) and `manifest.hmac` (HMAC-SHA256 over the manifest with the evidence key). A copy goes to the repository. `banksia evidence verify <dir>` checks it.
 
 Evidence records what was tested, when, from which snapshot, the snapshot age, time to restore and per-item results. It does not contain message bodies or file contents, and identifies source users by principal tag.

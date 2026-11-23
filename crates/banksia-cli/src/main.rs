@@ -54,6 +54,115 @@ enum Command {
         #[command(subcommand)]
         command: SnapshotCommand,
     },
+    /// Restore items into the tenant: plan, then apply with approval.
+    Restore {
+        #[command(subcommand)]
+        command: RestoreCommand,
+    },
+    /// Restore a sample into a throwaway target, verify it, write evidence.
+    RestoreTest {
+        #[command(subcommand)]
+        command: RestoreTestCommand,
+    },
+    /// Check restore-test evidence packs.
+    Evidence {
+        #[command(subcommand)]
+        command: EvidenceCommand,
+    },
+    /// Show audit events from the repository.
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum RestoreTestCommand {
+    /// Run a restore test now. Exit code 0 on pass, 3 on fail.
+    Run {
+        /// Limit to these source users. Repeatable.
+        #[arg(long)]
+        user: Vec<String>,
+        /// Hex seed, to repeat an earlier sample.
+        #[arg(long)]
+        seed: Option<String>,
+        /// Override restore_test.evidence_dir.
+        #[arg(long)]
+        evidence_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvidenceCommand {
+    /// Verify an evidence pack directory against its manifest and signature.
+    Verify { dir: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum AuditCommand {
+    /// List audit events, oldest first.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RestoreCommand {
+    /// Build a restore plan from a snapshot. Makes no tenant writes: it reads
+    /// the repository, resolves the target with the read-only backup app,
+    /// writes a plan file and records a plan_created audit event.
+    Plan {
+        /// Source user (UPN or object id) whose backup to restore from.
+        #[arg(long)]
+        user: String,
+        #[arg(long, value_parser = parse_workload)]
+        workload: Workload,
+        /// Snapshot id, or `latest`.
+        #[arg(long, default_value = "latest")]
+        snapshot: String,
+        /// Mail: message id to restore. Repeatable.
+        #[arg(long)]
+        message: Vec<String>,
+        /// Mail: folder path to restore, for example `Inbox/Projects`.
+        #[arg(long)]
+        folder: Option<String>,
+        /// OneDrive: item id to restore. Repeatable.
+        #[arg(long)]
+        item: Vec<String>,
+        /// OneDrive: file or folder path to restore.
+        #[arg(long)]
+        path: Option<String>,
+        /// Restore everything in the snapshot.
+        #[arg(long)]
+        all: bool,
+        /// Target user. Defaults to the source user.
+        #[arg(long)]
+        target: Option<String>,
+        /// Recreate the original folder structure instead of restoring under
+        /// `Banksia Restore/<plan id>`.
+        #[arg(long)]
+        in_place: bool,
+        /// Why this restore is needed, for the audit trail.
+        #[arg(long, default_value = "")]
+        reason: String,
+        /// Where to write the plan.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Apply an approved plan. Requires the plan hash printed by `plan`.
+    Apply {
+        #[arg(long)]
+        plan: PathBuf,
+        /// The full 64-character plan hash printed by `restore plan`.
+        #[arg(long)]
+        approve: String,
+        /// Run every check and lookup, then report what would happen. No writes.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -279,6 +388,114 @@ async fn run(cli: Cli) -> Result<std::process::ExitCode> {
                 }
             }
         }
+        Command::Restore { command } => return restore_cmd(&cli.config, command).await,
+        Command::RestoreTest {
+            command:
+                RestoreTestCommand::Run {
+                    user,
+                    seed,
+                    evidence_dir,
+                },
+        } => {
+            let cfg = Config::load(&cli.config)?;
+            let policy = cfg
+                .restore_test
+                .as_ref()
+                .context("restore_test is not configured")?;
+            let repo = open_repo(&cfg).await?;
+            let auth = policy
+                .auth
+                .as_ref()
+                .or(cfg.restore.auth.as_ref())
+                .context("configure restore_test.auth or restore.auth")?;
+            let test_graph = banksia_core::graph::client(&cfg, auth, "restore_test.auth")?;
+            if let Some(sd) = &seed
+                && (sd.is_empty() || !sd.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
+                bail!("--seed must be hex");
+            }
+            let ctx = banksia_core::restore_test::RestoreTestContext {
+                repo: &repo,
+                test_graph: &test_graph,
+                policy,
+                state_dir: cfg.state.dir.clone(),
+                operator: banksia_core::audit::operator(),
+                repository_label: repo.store().label().to_string(),
+                seed,
+                users: user,
+                expected: cfg.backup.users.clone(),
+            };
+            let pack = banksia_core::restore_test::run(&ctx).await?;
+            let dir = evidence_dir.unwrap_or_else(|| policy.evidence_dir.clone());
+            let dir = if dir.is_relative() {
+                std::env::current_dir()?.join(dir)
+            } else {
+                dir
+            };
+            let out = banksia_core::evidence::write(&pack, &repo, &dir).await?;
+            let s = &pack.summary;
+            println!(
+                "restore test {}: {} ({} checks: {} passed, {} failed, {} skipped; {} items verified of {})",
+                pack.run_id,
+                pack.result.word(),
+                s.checks,
+                s.checks_passed,
+                s.checks_failed,
+                s.checks_skipped,
+                s.items_verified,
+                s.items_tested
+            );
+            for c in &pack.checks {
+                if !c.reasons.is_empty() {
+                    println!(
+                        "  {} {}: {}",
+                        c.workload,
+                        &c.source_principal_tag[..12],
+                        c.reasons.join("; ")
+                    );
+                }
+            }
+            println!("evidence written to {}", out.display());
+            if pack.result != banksia_core::evidence::Verdict::Pass {
+                return Ok(std::process::ExitCode::from(3));
+            }
+        }
+        Command::Evidence {
+            command: EvidenceCommand::Verify { dir },
+        } => {
+            let cfg = Config::load(&cli.config)?;
+            let key = load_master_key(&cfg)?;
+            let pack = banksia_core::evidence::verify(&dir, &key.derive())?;
+            println!(
+                "evidence {} is intact: result {}, {} items verified of {}, completed {}",
+                pack.run_id,
+                pack.result.word(),
+                pack.summary.items_verified,
+                pack.summary.items_tested,
+                pack.completed
+            );
+        }
+        Command::Audit {
+            command: AuditCommand::List { json },
+        } => {
+            let cfg = Config::load(&cli.config)?;
+            let repo = open_repo(&cfg).await?;
+            let events = repo.audit_events().await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&events)?);
+            } else {
+                for e in events {
+                    println!(
+                        "{}  {:<28} {:<16} plan {}  {}",
+                        e.time,
+                        e.kind,
+                        e.operator,
+                        e.plan_id.as_deref().unwrap_or("-"),
+                        e.details
+                    );
+                }
+            }
+        }
         Command::Repo { command } => {
             let cfg = Config::load(&cli.config)?;
             let store = Store::from_config(&cfg.storage)?;
@@ -306,6 +523,203 @@ async fn run(cli: Cli) -> Result<std::process::ExitCode> {
                         }))?
                     );
                 }
+            }
+        }
+    }
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+async fn restore_cmd(
+    config: &std::path::Path,
+    command: RestoreCommand,
+) -> Result<std::process::ExitCode> {
+    use banksia_core::restore::{self, PlanRequest, Selection};
+    let cfg = Config::load(config)?;
+    let repo = open_repo(&cfg).await?;
+    match command {
+        RestoreCommand::Plan {
+            user,
+            workload,
+            snapshot,
+            message,
+            folder,
+            item,
+            path,
+            all,
+            target,
+            in_place,
+            reason,
+            out,
+        } => {
+            let chosen = [
+                !message.is_empty(),
+                folder.is_some(),
+                !item.is_empty(),
+                path.is_some(),
+                all,
+            ]
+            .iter()
+            .filter(|x| **x)
+            .count();
+            if chosen != 1 {
+                bail!("choose exactly one of --message, --folder, --item, --path or --all");
+            }
+            let selection = if all {
+                Selection::All
+            } else if !message.is_empty() {
+                Selection::MailMessages(message)
+            } else if let Some(f) = folder {
+                Selection::MailFolder(f)
+            } else if !item.is_empty() {
+                Selection::DriveItems(item)
+            } else {
+                Selection::DrivePath(path.expect("checked"))
+            };
+            let snap = load_snapshot(&repo, &user, workload, &snapshot).await?;
+            let target_user = target.unwrap_or_else(|| {
+                snap.principal
+                    .upn
+                    .clone()
+                    .unwrap_or_else(|| snap.principal.object_id.clone())
+            });
+            // Resolve the target with read-only backup credentials; planning never writes.
+            let graph = banksia_core::graph::client(&cfg, &cfg.backup.auth, "backup.auth")?;
+            let who = banksia_core::backup::resolve_user(&graph, &target_user)
+                .await
+                .with_context(|| format!("cannot resolve target {target_user}"))?;
+            if !cfg.restore.is_allowed(&target_user, &who.object_id) {
+                eprintln!(
+                    "warning: {target_user} is not on restore.allowed_targets; apply will refuse this plan"
+                );
+            }
+            let plan = restore::build_plan(
+                &repo,
+                PlanRequest {
+                    snapshot: &snap,
+                    selection,
+                    target_user,
+                    target_object_id: who.object_id,
+                    in_place,
+                    created_by: banksia_core::audit::operator(),
+                    purpose: reason,
+                },
+            )?;
+            let bytes = restore::encode_plan(&plan)?;
+            let hash = restore::plan_hash(&bytes);
+            if out.exists() {
+                bail!("{} already exists", out.display());
+            }
+            std::fs::write(&out, &bytes)
+                .with_context(|| format!("cannot write {}", out.display()))?;
+            repo.audit(
+                "restore.plan_created",
+                &plan.created_by,
+                Some((&plan.plan_id, &hash)),
+                serde_json::json!({
+                    "target": plan.target.user,
+                    "snapshot": plan.source.snapshot_id,
+                    "workload": plan.source.workload,
+                    "summary": plan.summary,
+                    "purpose": plan.purpose,
+                }),
+            )
+            .await?;
+            println!("restore plan {}", plan.plan_id);
+            println!(
+                "  source   {} {} snapshot {} ({})",
+                plan.source.user.as_deref().unwrap_or("?"),
+                plan.source.workload,
+                plan.source.snapshot_id,
+                plan.source.snapshot_completed
+            );
+            println!(
+                "  target   {} ({})",
+                plan.target.user, plan.target.object_id
+            );
+            match &plan.mode {
+                restore::RestoreMode::InPlace => {
+                    println!("  mode     in place (additive; existing items are never overwritten)")
+                }
+                restore::RestoreMode::Alternate { root } => {
+                    println!("  mode     under {}", root.join("/"))
+                }
+            }
+            let s = &plan.summary;
+            println!(
+                "  actions  {} mail folders, {} messages, {} drive folders, {} files, {} bytes",
+                s.mail_folders, s.messages, s.drive_folders, s.files, s.bytes
+            );
+            for a in plan.actions.iter().take(20) {
+                println!("    {}", a.describe());
+            }
+            if plan.actions.len() > 20 {
+                println!("    ... {} more", plan.actions.len() - 20);
+            }
+            println!("  written  {}", out.display());
+            println!("  hash     {hash}");
+            println!();
+            println!("To apply after review:");
+            println!(
+                "  banksia restore apply --plan {} --approve {}",
+                out.display(),
+                &hash[..16]
+            );
+        }
+        RestoreCommand::Apply {
+            plan,
+            approve,
+            dry_run,
+            json,
+        } => {
+            let bytes =
+                std::fs::read(&plan).with_context(|| format!("cannot read {}", plan.display()))?;
+            let (plan, hash) = restore::verify_approval(&bytes, &approve)?;
+            let auth = cfg
+                .restore
+                .auth
+                .as_ref()
+                .context("restore.auth is not configured")?;
+            let graph = banksia_core::graph::client(&cfg, auth, "restore.auth")?;
+            let ctx = banksia_core::restore::apply::ApplyContext {
+                repo: &repo,
+                graph: &graph,
+                state_dir: cfg.state.dir.clone(),
+                enabled: cfg.restore.enabled,
+                allowed_targets: cfg.restore.allowed_targets.clone(),
+                operator: banksia_core::audit::operator(),
+                audit_kind: "restore",
+            };
+            let report = banksia_core::restore::apply::apply(&ctx, &plan, &hash, dry_run).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                for r in &report.results {
+                    println!(
+                        "{:<22} {}{}",
+                        format!("{:?}", r.outcome),
+                        r.action,
+                        r.detail
+                            .as_ref()
+                            .map(|d| format!("  ({d})"))
+                            .unwrap_or_default()
+                    );
+                }
+                println!(
+                    "{}: {} {}, {} already present, {} failed in {} ms",
+                    if dry_run { "dry run" } else { "applied" },
+                    report.created,
+                    if dry_run {
+                        "would be created"
+                    } else {
+                        "created"
+                    },
+                    report.already_present,
+                    report.failed,
+                    report.duration_ms
+                );
+            }
+            if !report.ok() {
+                return Ok(std::process::ExitCode::from(2));
             }
         }
     }
